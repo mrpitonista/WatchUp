@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <hr>
+<p>
+  <a href="/yt/clear_logs"><button>🧹 Clear Progress Logs</button></a>
+  <a href="/yt/clear_history"><button>🧻 Clear History</button></a>
+</p>
+<hr>
+  <title>Download History</title>
+</head>
+<body>
+  <h1>Download History</h1>
+  <ul>
+    {% for entry in history %}
+      <li>
+          <strong>{{ entry.timestamp }}</strong><br>
+          <em>{{ entry.title }}</em><br>
+          {{ entry.url }}<br>
+          Saved to: {{ entry.folder }}<br><br>
+
+          <form method="POST" action="/yt">
+            <input type="hidden" name="url" value="{{ entry.url }}">
+            <input type="hidden" name="quality" value="best">
+            <input type="hidden" name="format" value="video">
+            <input type="hidden" name="folder" value="Videos">
+            <button type="submit">Download again</button>
+          </form>
+      </li>
+    {% else %}
+      <li>No downloads yet.</li>
+    {% endfor %}
+  </ul>
+  <a href="/yt">← Back to Downloader</a>
+</body>
+</html>

@@ -1,0 +1,47 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+.MagnetEnv/
+.MagnetEnv*/
+
+# macOS metadata
+.DS_Store
+
+# Environment files
+*.env
+
+# Logs and cache
+*.log
+*.json
+*.sqlite3
+*.db
+cache/
+logs/
+*.pid
+
+# Flask server logs
+*.pyc
+*.pyo
+
+# Output files
+Output/
+output/
+
+# PyCharm/VSCode project settings
+.idea/
+.vscode/
+
+# System files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# OS-generated files
+*.swp
+*.bak
+*.tmp

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>YT-DLP Web Downloader</title>
+</head>
+<body>
+  <h1>YT-DLP Web Downloader</h1>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <p><strong>{{ category }}:</strong> {{ message }}</p>
+    {% endfor %}
+  {% endwith %}
+
+  <form method="post">
+    <label>YouTube/Stream URL:</label><br>
+    <input type="text" name="url" required><br><br>
+
+    <label>Quality:</label><br>
+    <select name="quality">
+      <option value="best">Best (automatic)</option>
+      <option value="bestvideo[height<=1080]+bestaudio">1080p</option>
+      <option value="bestvideo[height<=720]+bestaudio">720p</option>
+      <option value="bestvideo[height<=480]+bestaudio">480p</option>
+      <option value="bestvideo[height<=360]+bestaudio">360p</option>
+      <option value="worst">Worst (smallest)</option>
+    </select><br><br>
+
+    <label>Format:</label><br>
+    <select name="format">
+      <option value="video">Video</option>
+      <option value="audio">Audio</option>
+    </select><br><br>
+
+    <label>Subtitles:</label>
+    <input type="checkbox" name="subtitles"><br><br>
+
+    <label>Clip section (e.g., 00:10:00-00:15:00):</label><br>
+    <input type="text" name="section"><br><br>
+
+    <label>Save to folder:</label><br>
+    <select name="folder">
+      {% for name, path in folders.items() %}
+        <option value="{{ name }}">{{ name }}</option>
+      {% endfor %}
+    </select><br><br>
+
+    <button type="submit">Start Download</button>
+  </form>
+
+  <hr>
+  <p>
+    <a href="/yt/history">📜 View Download History</a>
+  </p>
+
+  <!-- ✅ Progress Display -->
+  <h2>Live Download Progress</h2>
+  <p>To view progress, enter a job ID:</p>
+  <input type="text" id="progress-uid" placeholder="Enter download ID">
+  <button onclick="startTracking()">Track</button>
+
+  <pre id="progress-log" style="border:1px solid #ccc; padding:1em; max-height:300px; overflow-y:auto;">
+Progress will appear here...
+  </pre>
+  <script>
+    let intervalId = null;
+  
+    function startTracking() {
+      const uid = document.getElementById("progress-uid").value.trim();
+      const logBox = document.getElementById("progress-log");
+  
+      if (!uid) {
+        alert("Please enter a valid download ID.");
+        return;
+      }
+  
+      logBox.innerText = "Starting to track download: " + uid;
+  
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+  
+      intervalId = setInterval(() => {
+        fetch(`/yt/progress/${uid}`)
+          .then(res => res.text())
+          .then(text => {
+            logBox.innerText = text;
+  
+            // ✅ Auto-stop when download hits 100%
+            if (text.includes("100%") && text.includes("at") && text.includes("in")) {
+              clearInterval(intervalId);
+              logBox.innerText += "\n✅ Download complete. Tracking stopped.";
+            }
+          })
+          .catch(err => {
+            logBox.innerText = "⚠️ Error fetching progress.";
+            console.error("Progress error:", err);
+          });
+      }, 2000);
+    }
+  </script>  
+</body>
+</html>
