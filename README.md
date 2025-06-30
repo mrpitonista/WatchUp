@@ -8,6 +8,7 @@ WatchUp is a small Flask application that exposes a web interface for downloadin
 * **Background downloads** – downloads run in a background thread while their progress is written to a log file.  A job identifier is displayed so progress can be checked from the browser.
 * **Download history** – each request is logged to `download_history.json` with timestamp, title, URL and destination.
 * **History/Log management** – endpoints exist to clear history or any progress log files.
+* **Magnet link downloads** – submit a magnet URI which is handed off to `aria2c`.
 * **Blueprint friendly** – the application registers a second blueprint named `shopinsight` if it is available.  This repository does not include it but `app.py` expects it to exist alongside `WatchUp` in a sibling folder `ShopInsight/Modules`.
 
 ## Requirements
@@ -15,6 +16,7 @@ WatchUp is a small Flask application that exposes a web interface for downloadin
 * Python 3.8+
 * `yt-dlp` for fetching the videos
 * Flask
+* `aria2c` for magnet link support (optional but required for the `/yt/magnet` endpoint)
 
 Install dependencies using `pip`:
 
