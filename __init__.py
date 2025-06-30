@@ -99,13 +99,17 @@ def index():
         folder_path = DOWNLOAD_FOLDERS.get(folder_key, '/tmp')
         subtitles = 'subtitles' in request.form
         section = request.form.get('section', '').strip()
+        audio_container = request.form.get('audio_container', 'mp3').strip() or 'mp3'
+        video_container = request.form.get('video_container', 'mp4').strip() or 'mp4'
 
         uid = str(uuid.uuid4())[:8]
         output_template = os.path.join(folder_path, '%(title)s.%(ext)s')
         cmd = ['yt-dlp', '-f', quality, '-o', output_template, url]
 
         if fmt == 'audio':
-            cmd += ['--extract-audio', '--audio-format', 'mp3']
+            cmd += ['--extract-audio', '--audio-format', audio_container]
+        else:
+            cmd += ['--remux-video', video_container]
 
         if subtitles:
             cmd += [
