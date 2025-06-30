@@ -45,7 +45,7 @@ app.py           - Flask application entry point registering blueprints
 __init__.py      - Implementation of the YouTube/yt-dlp blueprint
 config.py        - Basic configuration including download folder paths
 requirements.txt - Python dependencies
-static/          - Placeholder for JavaScript assets
+static/          - Optional JavaScript assets
 templates/yt/    - HTML templates for the downloader and history views
 ```
 
