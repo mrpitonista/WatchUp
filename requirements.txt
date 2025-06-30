@@ -1,4 +1,2 @@
 Flask
 yt-dlp
-celery
-redis
