@@ -52,6 +52,23 @@ def log_download(url, folder_path):
     except Exception as e:
         print("❌ Failed to log download:", e)
 
+# Simple history logger for magnet downloads
+def log_magnet_download(link, folder_path):
+    entry = {
+        "url": link,
+        "title": "Magnet Download",
+        "folder": str(folder_path),
+        "timestamp": datetime.now().isoformat()
+    }
+    try:
+        history = []
+        if history_path.exists():
+            history = json.loads(history_path.read_text())
+        history.insert(0, entry)
+        history_path.write_text(json.dumps(history, indent=2))
+    except Exception as e:
+        print("❌ Failed to log magnet download:", e)
+
 # Background downloader with progress tracking
 def run_download_and_track(cmd, uid):
     log_path = this_dir / f"progress_{uid}.log"
@@ -144,3 +161,26 @@ def get_progress(uid):
     if not log_path.exists():
         return "Waiting for log...", 200
     return log_path.read_text(), 200
+
+# ------- Magnet link downloader -------
+@yt_bp.route('/yt/magnet', methods=['POST'])
+def magnet_download():
+    magnet = request.form.get('magnet', '').strip()
+    folder_key = request.form.get('folder', '')
+    folder_path = DOWNLOAD_FOLDERS.get(folder_key, '/tmp')
+
+    if not magnet:
+        flash('Magnet link required', 'danger')
+        return redirect(url_for('yt.index'))
+
+    uid = str(uuid.uuid4())[:8]
+    cmd = ['aria2c', '--dir', folder_path, magnet]
+
+    try:
+        Thread(target=run_download_and_track, args=(cmd, uid), daemon=True).start()
+        log_magnet_download(magnet, folder_path)
+        flash(f"Magnet download started [ID: {uid}]", 'success')
+    except Exception as e:
+        flash(f"Magnet download error: {e}", 'danger')
+
+    return redirect(url_for('yt.index'))
