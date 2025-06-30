@@ -55,7 +55,7 @@
 
   <!-- ✅ Progress Display -->
   <h2>Live Download Progress</h2>
-  <p>To view progress, enter a job ID:</p>
+  <p>To view progress, enter a job ID (video or magnet):</p>
   <input type="text" id="progress-uid" placeholder="Enter download ID">
   <button onclick="startTracking()">Track</button>
 
@@ -98,6 +98,22 @@ Progress will appear here...
           });
       }, 2000);
     }
-  </script>  
+  </script>
+
+  <hr>
+  <h2>Magnet Link Downloader</h2>
+  <form method="post" action="/yt/magnet">
+    <label>Magnet URL:</label><br>
+    <input type="text" name="magnet" required><br><br>
+
+    <label>Save to folder:</label><br>
+    <select name="folder">
+      {% for name, path in folders.items() %}
+        <option value="{{ name }}">{{ name }}</option>
+      {% endfor %}
+    </select><br><br>
+
+    <button type="submit">Start Magnet Download</button>
+  </form>
 </body>
 </html>
