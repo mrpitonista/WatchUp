@@ -15,7 +15,6 @@ WatchUp is a small Flask application that exposes a web interface for downloadin
 * Python 3.8+
 * `yt-dlp` for fetching the videos
 * Flask
-* Celery and Redis are listed in `requirements.txt` but are not currently used by the default code.
 
 Install dependencies using `pip`:
 
@@ -26,8 +25,6 @@ pip install -r requirements.txt
 ## Configuration
 
 `config.py` defines where downloaded files will be saved.  By default they are placed under `DOWNLOAD_ROOT` which is currently set to `/Users/Admin/Media/Other`.  Adjust this path and the `DOWNLOAD_FOLDERS` mapping to suit your environment before running the app.
-
-The file also contains placeholder configuration for Celery/Redis.  These settings are unused unless additional tasks are added.
 
 ## Running the application
 
@@ -50,7 +47,6 @@ config.py        - Basic configuration including download folder paths
 requirements.txt - Python dependencies
 static/          - Placeholder for JavaScript assets
 templates/yt/    - HTML templates for the downloader and history views
-tasks/           - Placeholder for Celery tasks (currently empty)
 ```
 
 The repository is minimal and meant for experimentation.  Pull requests or issues for enhancements are welcome.
