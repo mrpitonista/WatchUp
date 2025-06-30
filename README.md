@@ -4,7 +4,7 @@ WatchUp is a small Flask application that exposes a web interface for downloadin
 
 ## Features
 
-* **Web interface for yt-dlp** – submit a video URL, select the desired quality or audio-only mode, choose a destination folder and optional subtitle/section options.
+* **Web interface for yt-dlp** – submit a video URL, select the desired quality or audio-only mode, choose a destination folder and optional subtitle/section options.  The audio and video container can be specified (defaults are MP3 and MP4).
 * **Background downloads** – downloads run in a background thread while their progress is written to a log file.  A job identifier is displayed so progress can be checked from the browser.
 * **Download history** – each request is logged to `download_history.json` with timestamp, title, URL and destination.
 * **History/Log management** – endpoints exist to clear history or any progress log files.
