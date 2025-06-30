@@ -1,6 +1,7 @@
 from flask import Blueprint, render_template, request, redirect, url_for, flash
 import subprocess
 import os
+import shutil
 from config import DOWNLOAD_FOLDERS
 
 from pathlib import Path
@@ -71,9 +72,19 @@ def log_magnet_download(link, folder_path):
 
 # Background downloader with progress tracking
 def run_download_and_track(cmd, uid):
+    """Execute a shell command and stream output to a progress log."""
+
     log_path = this_dir / f"progress_{uid}.log"
-    with open(log_path, 'w') as f:
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    with open(log_path, "w") as f:
+        try:
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            )
+        except FileNotFoundError as e:
+            # Write the error message so the user can see what went wrong
+            f.write(str(e))
+            return
+
         for line in process.stdout:
             f.write(line)
             f.flush()
@@ -174,6 +185,12 @@ def magnet_download():
         return redirect(url_for('yt.index'))
 
     uid = str(uuid.uuid4())[:8]
+
+    # Verify that aria2c is available before attempting the download
+    if shutil.which('aria2c') is None:
+        flash('aria2c is required for magnet downloads. Please install it first.', 'danger')
+        return redirect(url_for('yt.index'))
+
     cmd = ['aria2c', '--dir', folder_path, magnet]
 
     try:
