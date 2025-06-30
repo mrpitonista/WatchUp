@@ -2,13 +2,14 @@
 <html>
 <head>
   <title>YT-DLP Web Downloader</title>
+  <link rel="stylesheet" href="{{ url_for('yt.static', filename='style.css') }}">
 </head>
 <body>
   <h1>YT-DLP Web Downloader</h1>
 
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% for category, message in messages %}
-      <p><strong>{{ category }}:</strong> {{ message }}</p>
+      <p class="flash-{{ category }}">{{ message }}</p>
     {% endfor %}
   {% endwith %}
 
@@ -59,7 +60,7 @@
   <input type="text" id="progress-uid" placeholder="Enter download ID">
   <button onclick="startTracking()">Track</button>
 
-  <pre id="progress-log" style="border:1px solid #ccc; padding:1em; max-height:300px; overflow-y:auto;">
+  <pre id="progress-log">
 Progress will appear here...
   </pre>
   <script>
