@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Text → Podcast Script → Audio</title>
+  <link rel="stylesheet" href="{{ url_for('yt.static', filename='style.css') }}">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+  <h1>Text → Podcast Script → Audio</h1>
+
+  <p>
+    <a href="/yt">⬅ Back to Dashboard</a>
+  </p>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <p class="flash-{{ category }}">{{ message }}</p>
+    {% endfor %}
+  {% endwith %}
+
+  <form method="post" enctype="multipart/form-data">
+    <label>Upload text files (.txt or .md):</label><br>
+    <input type="file" name="files" accept=".txt,.md" multiple required><br><br>
+
+    <label>Voice:</label><br>
+    <select name="voice">
+      {% for voice in voice_options %}
+        <option value="{{ voice }}" {% if voice == selected_voice %}selected{% endif %}>{{ voice }}</option>
+      {% endfor %}
+    </select><br><br>
+
+    <label>Tone:</label><br>
+    <select name="tone">
+      {% for tone in tone_options %}
+        <option value="{{ tone }}" {% if tone == selected_tone %}selected{% endif %}>{{ tone }}</option>
+      {% endfor %}
+    </select><br><br>
+
+    <button type="submit">Generate Podcast Episodes</button>
+  </form>
+
+  {% if results %}
+    <hr>
+    <h2>Results</h2>
+    {% for item in results %}
+      <div>
+        <h3>{{ item.original_name }}</h3>
+        <p>
+          <a href="{{ url_for('yt.podcast_download', category='scripts', filename=item.script_name) }}">Download Script</a>
+          |
+          <a href="{{ url_for('yt.podcast_download', category='audio', filename=item.audio_name) }}">Download Audio</a>
+        </p>
+        <audio controls preload="none" style="width: 100%; max-width: 500px;">
+          <source src="{{ url_for('yt.podcast_media', filename=item.audio_name) }}" type="audio/mpeg">
+          Your browser does not support the audio element.
+        </audio>
+      </div>
+      <hr>
+    {% endfor %}
+  {% endif %}
+
+  {% if errors %}
+    <h2>Errors</h2>
+    <ul>
+      {% for err in errors %}
+        <li><strong>{{ err.file }}:</strong> {{ err.error }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</body>
+</html>

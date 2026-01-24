@@ -1,3 +1,5 @@
 Flask
 yt-dlp
 aria2c
+openai
+python-dotenv

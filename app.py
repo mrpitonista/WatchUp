@@ -10,6 +10,7 @@ from shopinsight import shopinsight_bp  # 👈 Import the blueprint
 
 app = Flask(__name__)
 app.secret_key = 'dev'
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 
 app.register_blueprint(yt_bp)
 app.register_blueprint(shopinsight_bp)  # 👈 Register new blueprint
