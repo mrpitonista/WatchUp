@@ -20,11 +20,14 @@ PODCAST_ROOT = this_dir / "podcast_files"
 PODCAST_INPUT_DIR = PODCAST_ROOT / "inputs"
 PODCAST_SCRIPT_DIR = PODCAST_ROOT / "scripts"
 PODCAST_AUDIO_DIR = PODCAST_ROOT / "audio"
+PODCAST_JOBS_DIR = PODCAST_ROOT / "jobs"
+PODCAST_PROMPTS_PATH = PODCAST_ROOT / "podcast_prompts.json"
 
 PODCAST_ROOT.mkdir(exist_ok=True)
 PODCAST_INPUT_DIR.mkdir(exist_ok=True)
 PODCAST_SCRIPT_DIR.mkdir(exist_ok=True)
 PODCAST_AUDIO_DIR.mkdir(exist_ok=True)
+PODCAST_JOBS_DIR.mkdir(exist_ok=True)
 
 ENV_FILE = "openai_api_key.env"
 SCRIPT_MODEL = "gpt-4o-mini"
@@ -113,7 +116,7 @@ def is_allowed_text_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in {".txt", ".md"}
 
 
-def build_podcast_prompt(tone: str) -> str:
+def default_script_prompt_text() -> str:
     return (
         "You are a seasoned podcast writer. Turn the provided source text into a captivating "
         "podcast episode script. Requirements:\n"
@@ -122,15 +125,32 @@ def build_podcast_prompt(tone: str) -> str:
         "- Spoken-language style with short sentences and clear transitions.\n"
         "- Optional host cues like [pause] or [music sting], but keep them practical.\n"
         "- Preserve factual content; do not fabricate. If the source is unclear, use uncertainty phrasing.\n"
-        f"- Tone: {tone}.\n"
+        "- Tone: {tone}.\n"
     )
 
 
-def generate_podcast_script(client: OpenAI, text: str, tone: str) -> str:
+def default_audio_prompt_text() -> str:
+    return (
+        "Deliver a clear, engaging podcast narration with natural pacing and pauses. "
+        "Use an articulate, warm tone, emphasize key points, and avoid rushed delivery. "
+        "Keep the read conversational and easy to follow."
+    )
+
+
+def render_script_prompt(prompt_text: str, tone: str) -> str:
+    if tone:
+        if "{tone}" in prompt_text:
+            return prompt_text.replace("{tone}", tone)
+        return f"{prompt_text}\nTone: {tone}."
+    return prompt_text
+
+
+def generate_podcast_script(client: OpenAI, text: str, prompt_text: str, tone: str) -> str:
+    system_prompt = render_script_prompt(prompt_text, tone)
     response = client.chat.completions.create(
         model=SCRIPT_MODEL,
         messages=[
-            {"role": "system", "content": build_podcast_prompt(tone)},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": text},
         ],
         temperature=0.6,
@@ -139,16 +159,85 @@ def generate_podcast_script(client: OpenAI, text: str, tone: str) -> str:
     return script_text.strip()
 
 
-def tts_generate_audio(client: OpenAI, script_text: str, voice: str) -> bytes:
+def tts_generate_audio(client: OpenAI, script_text: str, voice: str, instructions: str) -> bytes:
     response = client.audio.speech.create(
         model=TTS_MODEL,
         voice=voice,
         input=script_text,
-        instructions=(
-            "Speak clearly with natural pauses and an engaging, podcast-ready delivery."
-        ),
+        instructions=instructions,
     )
     return response.read()
+
+
+def load_prompts() -> dict:
+    if PODCAST_PROMPTS_PATH.exists():
+        try:
+            return json.loads(PODCAST_PROMPTS_PATH.read_text())
+        except json.JSONDecodeError:
+            pass
+    prompts = {
+        "script_prompts": [{"name": "Default - Script", "text": default_script_prompt_text()}],
+        "audio_prompts": [{"name": "Default - Audio", "text": default_audio_prompt_text()}],
+    }
+    PODCAST_PROMPTS_PATH.write_text(json.dumps(prompts, indent=2))
+    return prompts
+
+
+def save_prompts(prompts: dict) -> None:
+    PODCAST_PROMPTS_PATH.write_text(json.dumps(prompts, indent=2))
+
+
+def unique_prompt_name(existing_names: set, name: str) -> str:
+    if name not in existing_names:
+        return name
+    index = 2
+    while f"{name} ({index})" in existing_names:
+        index += 1
+    return f"{name} ({index})"
+
+
+def prompt_lookup(prompts: list[dict], name: str) -> dict | None:
+    return next((prompt for prompt in prompts if prompt["name"] == name), None)
+
+
+def write_job_manifest(job_id: str, manifest: dict) -> None:
+    """Manifest format: {job_id, created_at, uploaded_files, script_files, audio_files, ...}."""
+    job_path = PODCAST_JOBS_DIR / f"{job_id}.json"
+    job_path.write_text(json.dumps(manifest, indent=2))
+
+
+def load_job_manifest(job_id: str) -> dict | None:
+    job_path = PODCAST_JOBS_DIR / f"{job_id}.json"
+    if not job_path.exists():
+        return None
+    try:
+        return json.loads(job_path.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
+def detect_step(manifest: dict | None, requested_step: str | None) -> int:
+    if not manifest:
+        return 1
+    if manifest.get("audio_files"):
+        return 7
+    if requested_step == "audio" and manifest.get("script_files"):
+        return 5
+    if manifest.get("script_files"):
+        return 4
+    return 2
+
+
+def normalize_voice(value: str | None) -> str:
+    if value in VOICE_OPTIONS:
+        return value
+    return DEFAULT_VOICE
+
+
+def normalize_tone(value: str | None) -> str:
+    if value in TONE_OPTIONS:
+        return value
+    return TONE_OPTIONS[0]
 
 # Background downloader with progress tracking
 def run_download_and_track(cmd, uid):
@@ -259,110 +348,272 @@ def get_progress(uid):
 
 @yt_bp.route('/yt/podcast', methods=['GET', 'POST'])
 def podcast():
-    results = []
     errors = []
-    selected_voice = request.form.get("voice", DEFAULT_VOICE)
-    selected_tone = request.form.get("tone", TONE_OPTIONS[0])
+    prompts = load_prompts()
+    script_prompts = prompts.get("script_prompts", [])
+    audio_prompts = prompts.get("audio_prompts", [])
+    job_id = request.args.get("job_id") or request.form.get("job_id")
+    manifest = load_job_manifest(job_id) if job_id else None
+    requested_step = request.args.get("step")
+
+    if job_id and not manifest:
+        flash("Podcast job not found. Please start again.", "danger")
+        job_id = None
 
     if request.method == 'POST':
-        files = request.files.getlist("files")
-        if not files or all(not f.filename for f in files):
-            flash("Please upload at least one .txt or .md file.", "danger")
-            return render_template(
-                'yt/podcast.html',
-                results=results,
-                errors=errors,
-                voice_options=VOICE_OPTIONS,
-                tone_options=TONE_OPTIONS,
-                selected_voice=selected_voice,
-                selected_tone=selected_tone,
-            )
+        action = request.form.get("action")
 
-        if len(files) > MAX_PODCAST_FILES:
-            flash(f"Please upload no more than {MAX_PODCAST_FILES} files per request.", "danger")
-            return render_template(
-                'yt/podcast.html',
-                results=results,
-                errors=errors,
-                voice_options=VOICE_OPTIONS,
-                tone_options=TONE_OPTIONS,
-                selected_voice=selected_voice,
-                selected_tone=selected_tone,
-            )
+        if action == "start":
+            files = request.files.getlist("files")
+            if not files or all(not f.filename for f in files):
+                flash("Please upload at least one .txt or .md file.", "danger")
+            elif len(files) > MAX_PODCAST_FILES:
+                flash(f"Please upload no more than {MAX_PODCAST_FILES} files per request.", "danger")
+            else:
+                job_id = uuid.uuid4().hex[:12]
+                manifest = {
+                    "job_id": job_id,
+                    "created_at": datetime.now().isoformat(),
+                    "uploaded_files": [],
+                    "script_files": [],
+                    "audio_files": [],
+                    "selected_tone": TONE_OPTIONS[0],
+                    "selected_voice": DEFAULT_VOICE,
+                    "selected_script_prompt_name": None,
+                    "selected_audio_prompt_name": None,
+                }
+                for upload in files:
+                    original_name = upload.filename or ""
+                    safe_name = secure_filename(original_name)
+                    if not safe_name:
+                        errors.append({"file": original_name, "error": "Invalid filename."})
+                        continue
+                    if not is_allowed_text_file(safe_name):
+                        errors.append({"file": safe_name, "error": "Only .txt and .md files are allowed."})
+                        continue
 
-        try:
-            client = get_openai_client()
-        except Exception as e:
-            flash(f"OpenAI configuration error: {e}", "danger")
-            return render_template(
-                'yt/podcast.html',
-                results=results,
-                errors=errors,
-                voice_options=VOICE_OPTIONS,
-                tone_options=TONE_OPTIONS,
-                selected_voice=selected_voice,
-                selected_tone=selected_tone,
-            )
+                    unique_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+                    base_name = Path(safe_name).stem
+                    suffix = Path(safe_name).suffix.lower()
+                    input_name = f"{base_name}_{unique_id}{suffix}"
+                    input_path = PODCAST_INPUT_DIR / input_name
 
-        for upload in files:
-            original_name = upload.filename or ""
-            safe_name = secure_filename(original_name)
-            if not safe_name:
-                errors.append({"file": original_name, "error": "Invalid filename."})
-                continue
+                    try:
+                        upload.save(input_path)
+                        manifest["uploaded_files"].append(
+                            {
+                                "original_name": safe_name,
+                                "input_filename": input_name,
+                                "input_path": str(input_path),
+                                "base_name": base_name,
+                            }
+                        )
+                    except Exception as e:
+                        errors.append({"file": safe_name, "error": str(e)})
 
-            if not is_allowed_text_file(safe_name):
-                errors.append({"file": safe_name, "error": "Only .txt and .md files are allowed."})
-                continue
+                if manifest["uploaded_files"]:
+                    write_job_manifest(job_id, manifest)
+                else:
+                    flash("No valid files were uploaded.", "danger")
+                    job_id = None
+                    manifest = None
 
-            unique_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-            base_name = Path(safe_name).stem
-            suffix = Path(safe_name).suffix.lower()
+        elif action == "save_script_prompt":
+            if not manifest:
+                flash("Podcast job not found. Please start again.", "danger")
+            else:
+                prompt_action = request.form.get("prompt_action")
+                selected_name = request.form.get("selected_script_prompt") or ""
+                prompt_text = request.form.get("script_prompt_text", "").strip()
+                prompt_name_input = request.form.get("prompt_name", "").strip()
+                existing_names = {prompt["name"] for prompt in script_prompts}
 
-            input_name = f"{base_name}_{unique_id}{suffix}"
-            input_path = PODCAST_INPUT_DIR / input_name
+                if prompt_action == "save_new":
+                    if not prompt_name_input or not prompt_text:
+                        flash("Provide a name and text to save a new prompt.", "danger")
+                    else:
+                        final_name = unique_prompt_name(existing_names, prompt_name_input)
+                        script_prompts.append({"name": final_name, "text": prompt_text})
+                        selected_name = final_name
+                        flash(f"Saved new script prompt: {final_name}", "success")
+                elif prompt_action == "overwrite":
+                    prompt = prompt_lookup(script_prompts, selected_name)
+                    if not prompt:
+                        flash("Select a script prompt to overwrite.", "danger")
+                    elif not prompt_text:
+                        flash("Prompt text cannot be empty.", "danger")
+                    else:
+                        prompt["text"] = prompt_text
+                        flash(f"Updated script prompt: {selected_name}", "success")
+                elif prompt_action == "delete":
+                    if len(script_prompts) <= 1:
+                        flash("At least one script prompt is required.", "danger")
+                    else:
+                        script_prompts = [p for p in script_prompts if p["name"] != selected_name]
+                        flash(f"Deleted script prompt: {selected_name}", "success")
+                        if selected_name and manifest.get("selected_script_prompt_name") == selected_name:
+                            manifest["selected_script_prompt_name"] = None
+                        selected_name = ""
+                else:
+                    flash("Unknown prompt action.", "danger")
 
-            try:
-                upload.save(input_path)
-                print(f"📥 Saved upload: {input_path}")
+                prompts["script_prompts"] = script_prompts
+                save_prompts(prompts)
+                manifest["selected_script_prompt_name"] = selected_name or manifest.get("selected_script_prompt_name")
+                write_job_manifest(manifest["job_id"], manifest)
 
-                text = input_path.read_text(encoding="utf-8-sig", errors="ignore")
-                if not text.strip():
-                    raise ValueError("File is empty or could not be read.")
+        elif action == "generate_scripts":
+            if not manifest:
+                flash("Podcast job not found. Please start again.", "danger")
+            else:
+                selected_name = request.form.get("selected_script_prompt") or ""
+                prompt_text = request.form.get("script_prompt_text", "").strip()
+                tone = normalize_tone(request.form.get("tone"))
+                manifest["selected_tone"] = tone
+                manifest["selected_script_prompt_name"] = selected_name or manifest.get("selected_script_prompt_name")
+                if not prompt_text and selected_name:
+                    prompt = prompt_lookup(script_prompts, selected_name)
+                    prompt_text = prompt["text"] if prompt else ""
+                if not prompt_text:
+                    flash("Script prompt text is required.", "danger")
+                else:
+                    try:
+                        client = get_openai_client()
+                    except Exception as e:
+                        flash(f"OpenAI configuration error: {e}", "danger")
+                    else:
+                        manifest["script_files"] = []
+                        for item in manifest.get("uploaded_files", []):
+                            input_path = Path(item["input_path"])
+                            if not input_path.exists():
+                                errors.append({"file": item["original_name"], "error": "Uploaded file missing."})
+                                continue
+                            text = input_path.read_text(encoding="utf-8-sig", errors="ignore")
+                            if not text.strip():
+                                errors.append({"file": item["original_name"], "error": "File is empty or unreadable."})
+                                continue
+                            try:
+                                script_text = generate_podcast_script(client, text, prompt_text, tone)
+                                if not script_text:
+                                    raise ValueError("Script generation returned empty content.")
+                                script_name = f"{item['base_name']}_{manifest['job_id']}_podcast_script.txt"
+                                script_path = PODCAST_SCRIPT_DIR / script_name
+                                script_path.write_text(script_text, encoding="utf-8")
+                                manifest["script_files"].append(
+                                    {
+                                        "original_name": item["original_name"],
+                                        "base_name": item["base_name"],
+                                        "script_filename": script_name,
+                                        "script_path": str(script_path),
+                                    }
+                                )
+                            except Exception as e:
+                                errors.append({"file": item["original_name"], "error": str(e)})
+                        write_job_manifest(manifest["job_id"], manifest)
 
-                script_text = generate_podcast_script(client, text, selected_tone)
-                if not script_text:
-                    raise ValueError("Script generation returned empty content.")
+        elif action == "save_audio_prompt":
+            if not manifest:
+                flash("Podcast job not found. Please start again.", "danger")
+            else:
+                prompt_action = request.form.get("prompt_action")
+                selected_name = request.form.get("selected_audio_prompt") or ""
+                prompt_text = request.form.get("audio_prompt_text", "").strip()
+                prompt_name_input = request.form.get("prompt_name", "").strip()
+                existing_names = {prompt["name"] for prompt in audio_prompts}
 
-                script_name = f"{base_name}_{unique_id}_podcast_script.txt"
-                script_path = PODCAST_SCRIPT_DIR / script_name
-                script_path.write_text(script_text, encoding="utf-8")
-                print(f"📝 Script generated: {script_path}")
+                if prompt_action == "save_new":
+                    if not prompt_name_input or not prompt_text:
+                        flash("Provide a name and text to save a new prompt.", "danger")
+                    else:
+                        final_name = unique_prompt_name(existing_names, prompt_name_input)
+                        audio_prompts.append({"name": final_name, "text": prompt_text})
+                        selected_name = final_name
+                        flash(f"Saved new audio prompt: {final_name}", "success")
+                elif prompt_action == "overwrite":
+                    prompt = prompt_lookup(audio_prompts, selected_name)
+                    if not prompt:
+                        flash("Select an audio prompt to overwrite.", "danger")
+                    elif not prompt_text:
+                        flash("Prompt text cannot be empty.", "danger")
+                    else:
+                        prompt["text"] = prompt_text
+                        flash(f"Updated audio prompt: {selected_name}", "success")
+                elif prompt_action == "delete":
+                    if len(audio_prompts) <= 1:
+                        flash("At least one audio prompt is required.", "danger")
+                    else:
+                        audio_prompts = [p for p in audio_prompts if p["name"] != selected_name]
+                        flash(f"Deleted audio prompt: {selected_name}", "success")
+                        if selected_name and manifest.get("selected_audio_prompt_name") == selected_name:
+                            manifest["selected_audio_prompt_name"] = None
+                        selected_name = ""
+                else:
+                    flash("Unknown prompt action.", "danger")
 
-                audio_name = f"{base_name}_{unique_id}.mp3"
-                audio_path = PODCAST_AUDIO_DIR / audio_name
-                audio_bytes = tts_generate_audio(client, script_text, selected_voice)
-                audio_path.write_bytes(audio_bytes)
-                print(f"🔊 Audio generated: {audio_path}")
+                prompts["audio_prompts"] = audio_prompts
+                save_prompts(prompts)
+                manifest["selected_audio_prompt_name"] = selected_name or manifest.get("selected_audio_prompt_name")
+                write_job_manifest(manifest["job_id"], manifest)
 
-                results.append({
-                    "original_name": safe_name,
-                    "script_name": script_name,
-                    "audio_name": audio_name,
-                    "timestamp": datetime.now().isoformat(),
-                })
-            except Exception as e:
-                print(f"❌ Podcast processing failed for {safe_name}: {e}")
-                errors.append({"file": safe_name, "error": str(e)})
+        elif action == "generate_audio":
+            if not manifest:
+                flash("Podcast job not found. Please start again.", "danger")
+            elif not manifest.get("script_files"):
+                flash("No scripts found. Generate scripts first.", "danger")
+            else:
+                selected_name = request.form.get("selected_audio_prompt") or ""
+                prompt_text = request.form.get("audio_prompt_text", "").strip()
+                voice = normalize_voice(request.form.get("voice"))
+                manifest["selected_voice"] = voice
+                manifest["selected_audio_prompt_name"] = selected_name or manifest.get("selected_audio_prompt_name")
+                if not prompt_text and selected_name:
+                    prompt = prompt_lookup(audio_prompts, selected_name)
+                    prompt_text = prompt["text"] if prompt else ""
+                if not prompt_text:
+                    flash("Audio prompt text is required.", "danger")
+                else:
+                    try:
+                        client = get_openai_client()
+                    except Exception as e:
+                        flash(f"OpenAI configuration error: {e}", "danger")
+                    else:
+                        manifest["audio_files"] = []
+                        for item in manifest.get("script_files", []):
+                            script_path = Path(item["script_path"])
+                            if not script_path.exists():
+                                errors.append({"file": item["script_filename"], "error": "Script file missing."})
+                                continue
+                            script_text = script_path.read_text(encoding="utf-8-sig", errors="ignore")
+                            if not script_text.strip():
+                                errors.append({"file": item["script_filename"], "error": "Script file is empty."})
+                                continue
+                            try:
+                                audio_name = f"{item['base_name']}_{manifest['job_id']}.mp3"
+                                audio_path = PODCAST_AUDIO_DIR / audio_name
+                                audio_bytes = tts_generate_audio(client, script_text, voice, prompt_text)
+                                audio_path.write_bytes(audio_bytes)
+                                manifest["audio_files"].append(
+                                    {
+                                        "original_name": item["original_name"],
+                                        "audio_filename": audio_name,
+                                        "audio_path": str(audio_path),
+                                        "script_filename": item["script_filename"],
+                                    }
+                                )
+                            except Exception as e:
+                                errors.append({"file": item["script_filename"], "error": str(e)})
+                        write_job_manifest(manifest["job_id"], manifest)
 
     return render_template(
         'yt/podcast.html',
-        results=results,
         errors=errors,
         voice_options=VOICE_OPTIONS,
         tone_options=TONE_OPTIONS,
-        selected_voice=selected_voice,
-        selected_tone=selected_tone,
+        job_id=job_id,
+        manifest=manifest,
+        current_step=detect_step(manifest, requested_step),
+        script_prompts=script_prompts,
+        audio_prompts=audio_prompts,
     )
 
 

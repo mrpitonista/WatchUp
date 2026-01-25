@@ -18,45 +18,126 @@
     {% endfor %}
   {% endwith %}
 
-  <form method="post" enctype="multipart/form-data">
-    <label>Upload text files (.txt or .md):</label><br>
-    <input type="file" name="files" accept=".txt,.md" multiple required><br><br>
+  {% set selected_script_prompt = manifest.selected_script_prompt_name if manifest else '' %}
+  {% set selected_audio_prompt = manifest.selected_audio_prompt_name if manifest else '' %}
+  {% set selected_tone = manifest.selected_tone if manifest else tone_options[0] %}
+  {% set selected_voice = manifest.selected_voice if manifest else voice_options[0] %}
 
-    <label>Voice:</label><br>
-    <select name="voice">
-      {% for voice in voice_options %}
-        <option value="{{ voice }}" {% if voice == selected_voice %}selected{% endif %}>{{ voice }}</option>
-      {% endfor %}
-    </select><br><br>
+  <p><strong>Step {{ current_step }} of 7</strong></p>
 
-    <label>Tone:</label><br>
-    <select name="tone">
-      {% for tone in tone_options %}
-        <option value="{{ tone }}" {% if tone == selected_tone %}selected{% endif %}>{{ tone }}</option>
-      {% endfor %}
-    </select><br><br>
+  {% if current_step == 1 %}
+    <form method="post" enctype="multipart/form-data">
+      <input type="hidden" name="action" value="start">
+      <label>Step 1: Upload text files (.txt or .md):</label><br>
+      <input type="file" name="files" accept=".txt,.md" multiple required><br><br>
+      <button type="submit">Next: Choose Script Prompt</button>
+    </form>
+  {% endif %}
 
-    <button type="submit">Generate Podcast Episodes</button>
-  </form>
+  {% if current_step == 2 %}
+    <h2>Step 2: Script Prompt</h2>
+    <form method="post">
+      <input type="hidden" name="job_id" value="{{ job_id }}">
+      <label>Saved script prompts:</label><br>
+      <select name="selected_script_prompt" id="scriptPromptSelect">
+        {% for prompt in script_prompts %}
+          <option value="{{ prompt.name }}" {% if prompt.name == selected_script_prompt %}selected{% endif %}>
+            {{ prompt.name }}
+          </option>
+        {% endfor %}
+      </select><br><br>
 
-  {% if results %}
-    <hr>
-    <h2>Results</h2>
-    {% for item in results %}
-      <div>
-        <h3>{{ item.original_name }}</h3>
-        <p>
-          <a href="{{ url_for('yt.podcast_download', category='scripts', filename=item.script_name) }}">Download Script</a>
-          |
-          <a href="{{ url_for('yt.podcast_download', category='audio', filename=item.audio_name) }}">Download Audio</a>
-        </p>
-        <audio controls preload="none" style="width: 100%; max-width: 500px;">
-          <source src="{{ url_for('yt.podcast_media', filename=item.audio_name) }}" type="audio/mpeg">
-          Your browser does not support the audio element.
-        </audio>
-      </div>
+      <label>Script prompt text:</label><br>
+      <textarea name="script_prompt_text" id="scriptPromptText" rows="10" style="width: 100%;">{% if selected_script_prompt %}{% for prompt in script_prompts %}{% if prompt.name == selected_script_prompt %}{{ prompt.text }}{% endif %}{% endfor %}{% else %}{{ script_prompts[0].text }}{% endif %}</textarea><br><br>
+
+      <label>Tone:</label><br>
+      <select name="tone">
+        {% for tone in tone_options %}
+          <option value="{{ tone }}" {% if tone == selected_tone %}selected{% endif %}>{{ tone }}</option>
+        {% endfor %}
+      </select><br><br>
+
+      <label>Save prompt as:</label><br>
+      <input type="text" name="prompt_name" placeholder="Prompt name"><br><br>
+
+      <input type="hidden" name="prompt_action" id="scriptPromptAction" value="">
+      <button type="submit" name="action" value="save_script_prompt" data-prompt-action="save_new">Save as new</button>
+      <button type="submit" name="action" value="save_script_prompt" data-prompt-action="overwrite">Overwrite selected</button>
+      <button type="submit" name="action" value="save_script_prompt" data-prompt-action="delete">Delete selected</button>
       <hr>
-    {% endfor %}
+      <button type="submit" name="action" value="generate_scripts">Next: Generate scripts</button>
+    </form>
+  {% endif %}
+
+  {% if current_step == 4 %}
+    <h2>Step 4: Scripts</h2>
+    {% if manifest and manifest.script_files %}
+      <ul>
+        {% for item in manifest.script_files %}
+          <li>
+            {{ item.original_name }} —
+            <a href="{{ url_for('yt.podcast_download', category='scripts', filename=item.script_filename) }}">Download Script</a>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    {% if job_id %}
+      <a href="{{ url_for('yt.podcast', job_id=job_id, step='audio') }}">Next: Audio stage</a>
+    {% endif %}
+  {% endif %}
+
+  {% if current_step == 5 %}
+    <h2>Step 5: Audio Prompt</h2>
+    <form method="post">
+      <input type="hidden" name="job_id" value="{{ job_id }}">
+      <label>Saved audio prompts:</label><br>
+      <select name="selected_audio_prompt" id="audioPromptSelect">
+        {% for prompt in audio_prompts %}
+          <option value="{{ prompt.name }}" {% if prompt.name == selected_audio_prompt %}selected{% endif %}>
+            {{ prompt.name }}
+          </option>
+        {% endfor %}
+      </select><br><br>
+
+      <label>Audio prompt text:</label><br>
+      <textarea name="audio_prompt_text" id="audioPromptText" rows="8" style="width: 100%;">{% if selected_audio_prompt %}{% for prompt in audio_prompts %}{% if prompt.name == selected_audio_prompt %}{{ prompt.text }}{% endif %}{% endfor %}{% else %}{{ audio_prompts[0].text }}{% endif %}</textarea><br><br>
+
+      <label>Voice:</label><br>
+      <select name="voice">
+        {% for voice in voice_options %}
+          <option value="{{ voice }}" {% if voice == selected_voice %}selected{% endif %}>{{ voice }}</option>
+        {% endfor %}
+      </select><br><br>
+
+      <label>Save prompt as:</label><br>
+      <input type="text" name="prompt_name" placeholder="Prompt name"><br><br>
+
+      <input type="hidden" name="prompt_action" id="audioPromptAction" value="">
+      <button type="submit" name="action" value="save_audio_prompt" data-prompt-action="save_new">Save as new</button>
+      <button type="submit" name="action" value="save_audio_prompt" data-prompt-action="overwrite">Overwrite selected</button>
+      <button type="submit" name="action" value="save_audio_prompt" data-prompt-action="delete">Delete selected</button>
+      <hr>
+      <button type="submit" name="action" value="generate_audio">Generate audio</button>
+    </form>
+  {% endif %}
+
+  {% if current_step == 7 %}
+    <h2>Step 7: Audio Results</h2>
+    {% if manifest and manifest.audio_files %}
+      {% for item in manifest.audio_files %}
+        <div>
+          <h3>{{ item.original_name }}</h3>
+          <p>
+            <a href="{{ url_for('yt.podcast_download', category='audio', filename=item.audio_filename) }}">Download Audio</a>
+          </p>
+          <audio controls preload="none" style="width: 100%; max-width: 500px;">
+            <source src="{{ url_for('yt.podcast_media', filename=item.audio_filename) }}" type="audio/mpeg">
+            Your browser does not support the audio element.
+          </audio>
+        </div>
+        <hr>
+      {% endfor %}
+    {% endif %}
   {% endif %}
 
   {% if errors %}
@@ -67,5 +148,41 @@
       {% endfor %}
     </ul>
   {% endif %}
+
+  <script>
+    const scriptPrompts = {{ script_prompts | tojson }};
+    const audioPrompts = {{ audio_prompts | tojson }};
+
+    function updatePromptText(selectId, textareaId, prompts) {
+      const select = document.getElementById(selectId);
+      const textarea = document.getElementById(textareaId);
+      if (!select || !textarea) return;
+      const selected = prompts.find((prompt) => prompt.name === select.value);
+      if (selected) {
+        textarea.value = selected.text;
+      }
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      const scriptSelect = document.getElementById("scriptPromptSelect");
+      const audioSelect = document.getElementById("audioPromptSelect");
+      if (scriptSelect) {
+        scriptSelect.addEventListener("change", () => updatePromptText("scriptPromptSelect", "scriptPromptText", scriptPrompts));
+      }
+      if (audioSelect) {
+        audioSelect.addEventListener("change", () => updatePromptText("audioPromptSelect", "audioPromptText", audioPrompts));
+      }
+
+      document.querySelectorAll("button[data-prompt-action]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const hiddenInputId = button.value === "save_script_prompt" ? "scriptPromptAction" : "audioPromptAction";
+          const hiddenInput = document.getElementById(hiddenInputId);
+          if (hiddenInput) {
+            hiddenInput.value = button.dataset.promptAction;
+          }
+        });
+      });
+    });
+  </script>
 </body>
 </html>

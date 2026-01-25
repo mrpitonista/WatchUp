@@ -45,3 +45,7 @@ Desktop.ini
 *.swp
 *.bak
 *.tmp
+
+# Podcast wizard state
+podcast_files/jobs/
+podcast_files/podcast_prompts.json
