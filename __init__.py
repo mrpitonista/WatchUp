@@ -2,6 +2,7 @@ from flask import Blueprint, render_template, request, redirect, url_for, flash,
 import subprocess
 import os
 import shutil
+import logging
 from config import DOWNLOAD_FOLDERS
 
 from pathlib import Path
@@ -15,6 +16,7 @@ from werkzeug.utils import secure_filename
 
 this_dir = Path(__file__).resolve().parent
 history_path = this_dir / "download_history.json"
+logger = logging.getLogger(__name__)
 
 PODCAST_ROOT = this_dir / "podcast_files"
 PODCAST_INPUT_DIR = PODCAST_ROOT / "inputs"
@@ -355,6 +357,7 @@ def podcast():
     job_id = request.args.get("job_id") or request.form.get("job_id")
     manifest = load_job_manifest(job_id) if job_id else None
     requested_step = request.args.get("step")
+    skip_script_checked = False
 
     if job_id and not manifest:
         flash("Podcast job not found. Please start again.", "danger")
@@ -369,7 +372,9 @@ def podcast():
 
         if action == "start":
             files = request.files.getlist("files")
-            skip_script = request.form.get("skip_script", "").lower() in {"on", "true", "1", "yes"}
+            skip_script = request.form.get("skip_script") in ("on", "true", "1", "yes", "checked")
+            logger.info(f"[PODCAST] skip_script={skip_script} raw={request.form.get('skip_script')}")
+            logger.debug("[PODCAST] skip_script flag received during start action.")
             if not files or all(not f.filename for f in files):
                 flash("Please upload at least one .txt or .md file.", "danger")
             elif len(files) > MAX_PODCAST_FILES:
@@ -473,6 +478,8 @@ def podcast():
                 flash("Podcast job not found. Please start again.", "danger")
             else:
                 skip_script = bool(manifest.get("script_skipped"))
+                logger.info(f"[PODCAST] skip_script={skip_script} raw={request.form.get('skip_script')}")
+                logger.debug("[PODCAST] skip_script flag applied during script generation action.")
                 selected_name = request.form.get("selected_script_prompt") or ""
                 prompt_text = request.form.get("script_prompt_text", "").strip()
                 tone = normalize_tone(request.form.get("tone"))
@@ -532,6 +539,7 @@ def podcast():
                                 continue
                             try:
                                 print(f"📝 Generating script for {item['original_name']}")
+                                # Checked skip_script should never log Step 2.
                                 script_text = generate_podcast_script(client, text, prompt_text, tone)
                                 if not script_text:
                                     raise ValueError("Script generation returned empty content.")
@@ -645,6 +653,11 @@ def podcast():
                                 errors.append({"file": item["script_filename"], "error": str(e)})
                         write_job_manifest(manifest["job_id"], manifest)
 
+    if manifest:
+        skip_script_checked = bool(manifest.get("script_skipped"))
+    elif request.method == "POST":
+        skip_script_checked = request.form.get("skip_script") in ("on", "true", "1", "yes", "checked")
+
     return render_template(
         'yt/podcast.html',
         errors=errors,
@@ -655,6 +668,7 @@ def podcast():
         current_step=detect_step(manifest, requested_step),
         script_prompts=script_prompts,
         audio_prompts=audio_prompts,
+        skip_script_checked=skip_script_checked,
     )
 
 
