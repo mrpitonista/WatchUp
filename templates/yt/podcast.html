@@ -30,6 +30,10 @@
       <input type="hidden" name="action" value="start">
       <label>Step 1: Upload text files (.txt or .md):</label><br>
       <input type="file" name="files" accept=".txt,.md" multiple required><br><br>
+      <label>
+        <input type="checkbox" name="skip_script">
+        Skip script generation (use uploaded text as-is)
+      </label><br><br>
       <button type="submit">Next: Choose Script Prompt</button>
     </form>
   {% endif %}

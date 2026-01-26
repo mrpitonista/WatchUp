@@ -360,11 +360,16 @@ def podcast():
         flash("Podcast job not found. Please start again.", "danger")
         job_id = None
 
+    # Smoke test path:
+    # - upload 2 files with skip off (expect script + audio)
+    # - upload 2 files with skip on (expect uploaded text as script + audio)
+    # - mixed failures: one file empty should error but the other succeeds
     if request.method == 'POST':
         action = request.form.get("action")
 
         if action == "start":
             files = request.files.getlist("files")
+            skip_script = request.form.get("skip_script", "").lower() in {"on", "true", "1", "yes"}
             if not files or all(not f.filename for f in files):
                 flash("Please upload at least one .txt or .md file.", "danger")
             elif len(files) > MAX_PODCAST_FILES:
@@ -377,6 +382,7 @@ def podcast():
                     "uploaded_files": [],
                     "script_files": [],
                     "audio_files": [],
+                    "script_skipped": skip_script,
                     "selected_tone": TONE_OPTIONS[0],
                     "selected_voice": DEFAULT_VOICE,
                     "selected_script_prompt_name": None,
@@ -466,17 +472,49 @@ def podcast():
             if not manifest:
                 flash("Podcast job not found. Please start again.", "danger")
             else:
+                skip_script = bool(manifest.get("script_skipped"))
                 selected_name = request.form.get("selected_script_prompt") or ""
                 prompt_text = request.form.get("script_prompt_text", "").strip()
                 tone = normalize_tone(request.form.get("tone"))
                 manifest["selected_tone"] = tone
                 manifest["selected_script_prompt_name"] = selected_name or manifest.get("selected_script_prompt_name")
-                if not prompt_text and selected_name:
-                    prompt = prompt_lookup(script_prompts, selected_name)
-                    prompt_text = prompt["text"] if prompt else ""
-                if not prompt_text:
-                    flash("Script prompt text is required.", "danger")
-                else:
+                if not skip_script:
+                    if not prompt_text and selected_name:
+                        prompt = prompt_lookup(script_prompts, selected_name)
+                        prompt_text = prompt["text"] if prompt else ""
+                    if not prompt_text:
+                        flash("Script prompt text is required.", "danger")
+                        prompt_text = ""
+                if skip_script:
+                    manifest["script_files"] = []
+                    for item in manifest.get("uploaded_files", []):
+                        input_path = Path(item["input_path"])
+                        if not input_path.exists():
+                            errors.append({"file": item["original_name"], "error": "Uploaded file missing."})
+                            continue
+                        text = input_path.read_text(encoding="utf-8-sig", errors="ignore")
+                        if not text.strip():
+                            errors.append({"file": item["original_name"], "error": "File is empty or unreadable."})
+                            continue
+                        try:
+                            print(f"⏭️ Skipping script generation for {item['original_name']}")
+                            script_text = text
+                            script_name = f"{item['base_name']}_{manifest['job_id']}_podcast_script.txt"
+                            script_path = PODCAST_SCRIPT_DIR / script_name
+                            script_path.write_text(script_text, encoding="utf-8")
+                            manifest["script_files"].append(
+                                {
+                                    "original_name": item["original_name"],
+                                    "base_name": item["base_name"],
+                                    "script_filename": script_name,
+                                    "script_path": str(script_path),
+                                    "script_skipped": True,
+                                }
+                            )
+                        except Exception as e:
+                            errors.append({"file": item["original_name"], "error": str(e)})
+                    write_job_manifest(manifest["job_id"], manifest)
+                elif prompt_text:
                     try:
                         client = get_openai_client()
                     except Exception as e:
@@ -493,6 +531,7 @@ def podcast():
                                 errors.append({"file": item["original_name"], "error": "File is empty or unreadable."})
                                 continue
                             try:
+                                print(f"📝 Generating script for {item['original_name']}")
                                 script_text = generate_podcast_script(client, text, prompt_text, tone)
                                 if not script_text:
                                     raise ValueError("Script generation returned empty content.")
@@ -505,6 +544,7 @@ def podcast():
                                         "base_name": item["base_name"],
                                         "script_filename": script_name,
                                         "script_path": str(script_path),
+                                        "script_skipped": False,
                                     }
                                 )
                             except Exception as e:
@@ -598,6 +638,7 @@ def podcast():
                                         "audio_filename": audio_name,
                                         "audio_path": str(audio_path),
                                         "script_filename": item["script_filename"],
+                                        "script_skipped": item.get("script_skipped", False),
                                     }
                                 )
                             except Exception as e:
