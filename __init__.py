@@ -156,14 +156,24 @@ def generate_podcast_script(
     model: str | None = None,
 ) -> str:
     system_prompt = render_script_prompt(prompt_text, tone)
-    response = client.chat.completions.create(
-        model=model or SCRIPT_MODEL,
-        messages=[
+    script_model = model or SCRIPT_MODEL
+    allowed_models = {"gpt-4o-mini", "gpt-5-mini"}
+    if script_model not in allowed_models:
+        raise ValueError(f"Unsupported script model: {script_model}")
+    kwargs = {
+        "model": script_model,
+        "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": text},
         ],
-        temperature=0.6,
+    }
+    if script_model == "gpt-4o-mini":
+        kwargs["temperature"] = 0.6
+    logger.info(
+        f"[SCRIPT] model={script_model} has_temperature={'temperature' in kwargs} "
+        f"temperature={kwargs.get('temperature')} has_top_p={'top_p' in kwargs}"
     )
+    response = client.chat.completions.create(**kwargs)
     script_text = response.choices[0].message.content or ""
     return script_text.strip()
 
