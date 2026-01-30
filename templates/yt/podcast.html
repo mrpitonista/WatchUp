@@ -216,6 +216,14 @@
         <hr>
       {% endfor %}
     {% endif %}
+    {% if job_id %}
+      <h3>Open job folders</h3>
+      <ul>
+        <li><a href="{{ url_for('yt.open_folder', job_id=job_id, kind='uploads') }}">Open uploads folder</a></li>
+        <li><a href="{{ url_for('yt.open_folder', job_id=job_id, kind='scripts') }}">Open scripts folder</a></li>
+        <li><a href="{{ url_for('yt.open_folder', job_id=job_id, kind='audio') }}">Open audio folder</a></li>
+      </ul>
+    {% endif %}
   {% endif %}
 
   {% if errors %}

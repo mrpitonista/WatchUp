@@ -4,6 +4,7 @@ import os
 import shutil
 import logging
 import re
+import sys
 from config import DOWNLOAD_FOLDERS
 
 from pathlib import Path
@@ -114,6 +115,23 @@ def load_api_key_from_env(env_file: str) -> str:
     if not api_key:
         raise ValueError(f"OPENAI_API_KEY not found in {env_path}")
     return api_key
+
+
+def resolve_job_folder(job_id: str, kind: str) -> Path | None:
+    folders = {
+        "uploads": PODCAST_UPLOAD_DIR,
+        "scripts": PODCAST_SCRIPT_DIR,
+        "audio": PODCAST_AUDIO_DIR,
+    }
+    base_dir = folders.get(kind)
+    if not base_dir:
+        return None
+    job_dir = (base_dir / job_id).resolve()
+    try:
+        job_dir.relative_to(base_dir.resolve())
+    except ValueError:
+        return None
+    return job_dir
 
 
 def get_openai_client(max_retries: int | None = None) -> OpenAI:
@@ -1211,6 +1229,30 @@ def podcast():
         skip_script_checked=skip_script_checked,
         job_status=job_status,
     )
+
+
+@yt_bp.route('/open-folder/<job_id>/<kind>')
+def open_folder(job_id, kind):
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", job_id):
+        flash("Invalid job id.", "danger")
+        return redirect(url_for('yt.podcast'))
+    job_dir = resolve_job_folder(job_id, kind)
+    if not job_dir:
+        flash("Invalid folder kind.", "danger")
+        return redirect(url_for('yt.podcast', job_id=job_id))
+    if not job_dir.exists() or not job_dir.is_dir():
+        flash(f"Folder not found for job_id={job_id}.", "danger")
+        return redirect(url_for('yt.podcast', job_id=job_id))
+    logger.info("[UI] open-folder job_id=%s kind=%s path=%s", job_id, kind, job_dir)
+    if sys.platform == "darwin":
+        subprocess.run(["open", str(job_dir)], check=False)
+        flash(f"Opened {kind} folder for job_id={job_id}", "success")
+    elif shutil.which("xdg-open"):
+        subprocess.run(["xdg-open", str(job_dir)], check=False)
+        flash(f"Opened {kind} folder for job_id={job_id}", "success")
+    else:
+        flash("Folder opening not supported on this OS.", "danger")
+    return redirect(url_for('yt.podcast', job_id=job_id))
 
 
 @yt_bp.route('/job/<job_id>/status')
