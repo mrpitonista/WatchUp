@@ -328,6 +328,25 @@ def split_text_with_metadata(text: str, max_chars: int = 7000) -> tuple[list[str
     def hard_cut(value: str, limit: int) -> list[str]:
         return [value[i : i + limit] for i in range(0, len(value), limit)]
 
+    def pack_units(units: list[str], limit: int, sep: str = "\n\n") -> list[str]:
+        if not units:
+            return []
+        packed = []
+        current = ""
+        for unit in units:
+            if not unit:
+                continue
+            candidate = unit if not current else f"{current}{sep}{unit}"
+            if len(candidate) <= limit:
+                current = candidate
+            else:
+                if current:
+                    packed.append(current)
+                current = unit
+        if current:
+            packed.append(current)
+        return packed
+
     def split_paragraph(paragraph: str, limit: int) -> list[str]:
         if len(paragraph) <= limit:
             return [paragraph]
@@ -406,8 +425,23 @@ def split_text_with_metadata(text: str, max_chars: int = 7000) -> tuple[list[str
             body_chunks = hard_cut(body, available)
         return combine_with_prefix(body_chunks or [""] if prefix else body_chunks, prefix, available)
 
+    def log_chunking(chunks: list[str], strategy: str, headings: bool) -> None:
+        logger.info(
+            "[SEGMENTER] headings=%s max_chars=%s text_len=%s chunks=%s strategy=%s",
+            headings,
+            max_chars,
+            len(text),
+            len(chunks),
+            strategy,
+        )
+        if len(chunks) > max(10, (len(text) // max_chars) + 5):
+            logger.warning("[SEGMENTER] Excessive chunk count detected...")
+
     if len(text) <= max_chars:
-        return [text.strip()], "headings" if headings_used else "paragraphs", headings_used
+        strategy = "headings" if headings_used else "paragraphs"
+        chunks = [text.strip()]
+        log_chunking(chunks, strategy, headings_used)
+        return chunks, strategy, headings_used
 
     if headings_used:
         units = []
@@ -449,11 +483,17 @@ def split_text_with_metadata(text: str, max_chars: int = 7000) -> tuple[list[str
         if current:
             packed.append(current.strip())
         strategy = "hardcut" if "hardcut" in strategy_used else "sentences" if "sentences" in strategy_used else "headings"
+        log_chunking(packed, strategy, headings_used)
         return packed, strategy, headings_used
 
     strategy_used.add("paragraphs")
-    paragraph_chunks = split_unit_with_fallback(text)
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    units = []
+    for paragraph in paragraphs:
+        units.extend(split_paragraph(paragraph, max_chars))
+    paragraph_chunks = pack_units(units, max_chars, sep="\n\n")
     strategy = "hardcut" if "hardcut" in strategy_used else "sentences" if "sentences" in strategy_used else "paragraphs"
+    log_chunking(paragraph_chunks, strategy, headings_used)
     return paragraph_chunks, strategy, headings_used
 
 
