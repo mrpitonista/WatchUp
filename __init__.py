@@ -10,6 +10,7 @@ from pathlib import Path
 import json
 from datetime import datetime
 from threading import Thread
+from concurrent.futures import ThreadPoolExecutor
 import uuid
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -24,6 +25,7 @@ PODCAST_UPLOAD_DIR = PODCAST_ROOT / "uploads"
 PODCAST_SCRIPT_DIR = PODCAST_ROOT / "scripts"
 PODCAST_AUDIO_DIR = PODCAST_ROOT / "audio"
 PODCAST_JOBS_DIR = PODCAST_ROOT / "jobs"
+PODCAST_OUTPUT_DIR = PODCAST_ROOT / "output"
 PODCAST_PROMPTS_PATH = PODCAST_ROOT / "podcast_prompts.json"
 
 PODCAST_ROOT.mkdir(exist_ok=True)
@@ -31,6 +33,7 @@ PODCAST_UPLOAD_DIR.mkdir(exist_ok=True)
 PODCAST_SCRIPT_DIR.mkdir(exist_ok=True)
 PODCAST_AUDIO_DIR.mkdir(exist_ok=True)
 PODCAST_JOBS_DIR.mkdir(exist_ok=True)
+PODCAST_OUTPUT_DIR.mkdir(exist_ok=True)
 
 ENV_FILE = "openai_api_key.env"
 SCRIPT_MODEL = "gpt-4o-mini"
@@ -39,6 +42,9 @@ DEFAULT_VOICE = "ash"
 VOICE_OPTIONS = ["alloy", "ash", "ballad", "coral", "sage", "verse"]
 TONE_OPTIONS = ["informative", "energetic", "calm"]
 MAX_PODCAST_FILES = 5
+SCRIPT_JOB_EXECUTOR = ThreadPoolExecutor(max_workers=2)
+SCRIPT_CHUNK_TIMEOUT = 90
+SCRIPT_MAX_RETRIES = 1
 
 yt_bp = Blueprint(
     'yt',
@@ -110,9 +116,47 @@ def load_api_key_from_env(env_file: str) -> str:
     return api_key
 
 
-def get_openai_client() -> OpenAI:
+def get_openai_client(max_retries: int | None = None) -> OpenAI:
     api_key = load_api_key_from_env(ENV_FILE)
-    return OpenAI(api_key=api_key)
+    if max_retries is None:
+        return OpenAI(api_key=api_key)
+    return OpenAI(api_key=api_key, max_retries=max_retries)
+
+
+def job_status_path(job_id: str) -> Path:
+    return PODCAST_OUTPUT_DIR / job_id / "status.json"
+
+
+def load_job_status(job_id: str) -> dict | None:
+    status_path = job_status_path(job_id)
+    if not status_path.exists():
+        return None
+    try:
+        return json.loads(status_path.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
+def write_job_status(job_id: str, status: dict) -> None:
+    status_path = job_status_path(job_id)
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(json.dumps(status, indent=2))
+
+
+def update_job_status(job_id: str, **updates: object) -> dict:
+    current = load_job_status(job_id) or {
+        "job_id": job_id,
+        "state": "queued",
+        "current_file": None,
+        "current_chunk": 0,
+        "total_chunks": 0,
+        "last_message": "",
+        "errors": [],
+        "outputs": {},
+    }
+    current.update(updates)
+    write_job_status(job_id, current)
+    return current
 
 
 def is_allowed_text_file(filename: str) -> bool:
@@ -238,6 +282,8 @@ def load_job_manifest(job_id: str) -> dict | None:
 def detect_step(manifest: dict | None, requested_step: str | None) -> int:
     if not manifest:
         return 1
+    if manifest.get("script_generation_state") in {"queued", "running", "error"}:
+        return 3
     if manifest.get("audio_files"):
         return 7
     if requested_step == "audio" and manifest.get("script_files"):
@@ -453,6 +499,219 @@ def merge_mp3_parts_ffmpeg(part_paths: list[Path], out_path: Path) -> tuple[bool
         if concat_list_path.exists():
             concat_list_path.unlink()
 
+
+def log_chunk_warning(job_id: str, file_name: str, chunk_count: int, max_chars: int) -> None:
+    if chunk_count > 80:
+        logger.warning(
+            "[PODCAST] job_id=%s file=%s chunks=%s. Consider increasing max_chars (current=%s).",
+            job_id,
+            file_name,
+            chunk_count,
+            max_chars,
+        )
+
+
+def write_chunk_error_file(job_script_dir: Path, base_name: str, index: int, error: str) -> Path:
+    error_name = f"{base_name}_script_part_{index:02d}.error.txt"
+    error_path = job_script_dir / error_name
+    error_path.write_text(error, encoding="utf-8")
+    return error_path
+
+
+def process_script_job(
+    job_id: str,
+    prompt_text: str,
+    tone: str,
+    script_model: str,
+    skip_script: bool,
+) -> None:
+    manifest = load_job_manifest(job_id)
+    if not manifest:
+        update_job_status(job_id, state="error", last_message="Job manifest missing.")
+        return
+    try:
+        update_job_status(
+            job_id,
+            state="running",
+            current_file=None,
+            current_chunk=0,
+            total_chunks=0,
+            last_message="Script generation started.",
+            errors=[],
+        )
+        logger.info("[PODCAST] job_id=%s script_model=%s skip_script=%s", job_id, script_model, skip_script)
+        auto_split = bool(manifest.get("auto_split", True))
+        max_chars = clamp_max_chars(int(manifest.get("max_chars", 7000)))
+        client = None
+        if not skip_script:
+            client = get_openai_client(max_retries=SCRIPT_MAX_RETRIES)
+        script_files = []
+        errors = []
+        for item in manifest.get("uploaded_files", []):
+            input_path = Path(item["input_path"])
+            job_script_dir = PODCAST_SCRIPT_DIR / job_id
+            job_script_dir.mkdir(parents=True, exist_ok=True)
+            if not input_path.exists():
+                error = {"file": item["original_name"], "error": "Uploaded file missing."}
+                errors.append(error)
+                update_job_status(job_id, errors=errors, last_message=error["error"])
+                continue
+            text = input_path.read_text(encoding="utf-8-sig", errors="ignore")
+            normalized_text = normalize_text(text)
+            if not normalized_text.strip():
+                error = {"file": item["original_name"], "error": "File is empty or unreadable."}
+                errors.append(error)
+                update_job_status(job_id, errors=errors, last_message=error["error"])
+                continue
+            if auto_split:
+                chunks, strategy, headings_detected = split_text_with_metadata(
+                    normalized_text,
+                    max_chars=max_chars,
+                )
+            else:
+                chunks = [normalized_text]
+                strategy = "none"
+                headings_detected = detect_heading_structure(normalized_text)
+            headings_used = auto_split and headings_detected
+            log_chunk_warning(job_id, item["original_name"], len(chunks), max_chars)
+            logger.info(
+                "[PODCAST] job_id=%s file=%s auto_split=%s max_chars=%s headings=%s chunks=%s skip_script=%s script_model=%s",
+                job_id,
+                item["original_name"],
+                auto_split,
+                max_chars,
+                headings_detected,
+                len(chunks),
+                skip_script,
+                script_model,
+            )
+            if auto_split:
+                logger.info("[PODCAST] chunking strategy: %s", strategy)
+            update_job_status(
+                job_id,
+                current_file=item["original_name"],
+                current_chunk=0,
+                total_chunks=len(chunks),
+                last_message=f"Processing {item['original_name']} ({len(chunks)} chunks).",
+            )
+            script_parts = []
+            for index, chunk in enumerate(chunks, start=1):
+                update_job_status(
+                    job_id,
+                    current_chunk=index,
+                    last_message=f"Chunk {index:02d}/{len(chunks)} for {item['original_name']}.",
+                )
+                if skip_script:
+                    part_name = f"{item['base_name']}_script_part_{index:02d}.txt"
+                    part_path = job_script_dir / part_name
+                    part_path.write_text(chunk, encoding="utf-8")
+                    script_parts.append(
+                        {
+                            "script_filename": f"{job_id}/{part_name}",
+                            "script_path": str(part_path),
+                        }
+                    )
+                    continue
+                start_time = datetime.now()
+                logger.info(
+                    "[PODCAST] job_id=%s file=%s chunk=%02d/%02d START %s",
+                    job_id,
+                    item["original_name"],
+                    index,
+                    len(chunks),
+                    start_time.isoformat(),
+                )
+                try:
+                    chunk_client = client.with_options(timeout=SCRIPT_CHUNK_TIMEOUT, max_retries=SCRIPT_MAX_RETRIES)
+                    script_text = generate_podcast_script(
+                        chunk_client,
+                        chunk,
+                        prompt_text,
+                        tone,
+                        model=script_model,
+                    )
+                    if not script_text:
+                        raise ValueError("Script generation returned empty content.")
+                    part_name = f"{item['base_name']}_script_part_{index:02d}.txt"
+                    part_path = job_script_dir / part_name
+                    part_path.write_text(script_text, encoding="utf-8")
+                    script_parts.append(
+                        {
+                            "script_filename": f"{job_id}/{part_name}",
+                            "script_path": str(part_path),
+                        }
+                    )
+                    duration = (datetime.now() - start_time).total_seconds()
+                    logger.info(
+                        "[PODCAST] job_id=%s file=%s chunk=%02d/%02d END %.2fs",
+                        job_id,
+                        item["original_name"],
+                        index,
+                        len(chunks),
+                        duration,
+                    )
+                except Exception as e:
+                    duration = (datetime.now() - start_time).total_seconds()
+                    error_message = f"Chunk {index:02d} failed after {duration:.2f}s: {e}"
+                    logger.error(
+                        "[PODCAST] job_id=%s file=%s chunk=%02d/%02d ERROR %s",
+                        job_id,
+                        item["original_name"],
+                        index,
+                        len(chunks),
+                        error_message,
+                    )
+                    write_chunk_error_file(job_script_dir, item["base_name"], index, error_message)
+                    errors.append({"file": item["original_name"], "error": error_message})
+                    update_job_status(job_id, errors=errors, last_message=error_message)
+                    continue
+            if not script_parts:
+                error = {"file": item["original_name"], "error": "Script generation returned no chunks."}
+                errors.append(error)
+                update_job_status(job_id, errors=errors, last_message=error["error"])
+                continue
+            full_name = f"{item['base_name']}_script_full.txt"
+            full_path = job_script_dir / full_name
+            full_path.write_text(
+                "\n\n".join(Path(part["script_path"]).read_text(encoding="utf-8") for part in script_parts),
+                encoding="utf-8",
+            )
+            script_files.append(
+                {
+                    "original_name": item["original_name"],
+                    "base_name": item["base_name"],
+                    "script_parts": script_parts,
+                    "script_full_filename": f"{job_id}/{full_name}",
+                    "script_full_path": str(full_path),
+                    "script_skipped": skip_script,
+                    "chunk_count": len(script_parts),
+                    "auto_split": auto_split,
+                    "max_chars": max_chars,
+                    "headings_detected": headings_detected,
+                    "headings_used": headings_used,
+                    "chunk_strategy": strategy,
+                    "script_model": script_model,
+                }
+            )
+        manifest["script_files"] = script_files
+        manifest["script_generation_state"] = "done"
+        write_job_manifest(job_id, manifest)
+        update_job_status(
+            job_id,
+            state="done",
+            current_file=None,
+            current_chunk=0,
+            total_chunks=0,
+            last_message="Script generation complete.",
+            errors=errors,
+            outputs={"script_files": script_files},
+        )
+    except Exception as e:
+        logger.exception("[PODCAST] job_id=%s script job failed.", job_id)
+        manifest["script_generation_state"] = "error"
+        write_job_manifest(job_id, manifest)
+        update_job_status(job_id, state="error", last_message=str(e))
+
 # Background downloader with progress tracking
 def run_download_and_track(cmd, uid):
     """Execute a shell command and stream output to a progress log."""
@@ -610,6 +869,7 @@ def podcast():
                     "uploaded_files": [],
                     "script_files": [],
                     "audio_files": [],
+                    "script_generation_state": None,
                     "script_skipped": skip_script,
                     "auto_split": auto_split,
                     "max_chars": max_chars,
@@ -728,183 +988,31 @@ def podcast():
                     if not prompt_text:
                         flash("Script prompt text is required.", "danger")
                         prompt_text = ""
-                if skip_script:
-                    manifest["script_files"] = []
-                    for item in manifest.get("uploaded_files", []):
-                        input_path = Path(item["input_path"])
-                        job_script_dir = PODCAST_SCRIPT_DIR / manifest["job_id"]
-                        job_script_dir.mkdir(parents=True, exist_ok=True)
-                        if not input_path.exists():
-                            errors.append({"file": item["original_name"], "error": "Uploaded file missing."})
-                            continue
-                        text = input_path.read_text(encoding="utf-8-sig", errors="ignore")
-                        normalized_text = normalize_text(text)
-                        if not normalized_text.strip():
-                            errors.append({"file": item["original_name"], "error": "File is empty or unreadable."})
-                            continue
-                        try:
-                            print(f"⏭️ Skipping script generation for {item['original_name']}")
-                            if auto_split:
-                                chunks, strategy, headings_detected = split_text_with_metadata(
-                                    normalized_text,
-                                    max_chars=max_chars,
-                                )
-                            else:
-                                chunks = [normalized_text]
-                                strategy = "none"
-                                headings_detected = detect_heading_structure(normalized_text)
-                            headings_used = auto_split and headings_detected
-                            logger.info(
-                                "[PODCAST] job_id=%s file=%s auto_split=%s max_chars=%s headings=%s chunks=%s skip_script=%s script_model=%s",
-                                manifest["job_id"],
-                                item["original_name"],
-                                auto_split,
-                                max_chars,
-                                headings_detected,
-                                len(chunks),
-                                skip_script,
-                                script_model,
-                            )
-                            if auto_split:
-                                logger.info("[PODCAST] chunking strategy: %s", strategy)
-                            script_parts = []
-                            for index, chunk in enumerate(chunks, start=1):
-                                part_name = f"{item['base_name']}_script_part_{index:02d}.txt"
-                                part_path = job_script_dir / part_name
-                                part_path.write_text(chunk, encoding="utf-8")
-                                script_parts.append(
-                                    {
-                                        "script_filename": f"{manifest['job_id']}/{part_name}",
-                                        "script_path": str(part_path),
-                                    }
-                                )
-                            full_name = f"{item['base_name']}_script_full.txt"
-                            full_path = job_script_dir / full_name
-                            full_path.write_text("\n\n".join(chunks), encoding="utf-8")
-                            manifest["script_files"].append(
-                                {
-                                    "original_name": item["original_name"],
-                                    "base_name": item["base_name"],
-                                    "script_parts": script_parts,
-                                    "script_full_filename": f"{manifest['job_id']}/{full_name}",
-                                    "script_full_path": str(full_path),
-                                    "script_skipped": True,
-                                    "chunk_count": len(chunks),
-                                    "auto_split": auto_split,
-                                    "max_chars": max_chars,
-                                    "headings_detected": headings_detected,
-                                    "headings_used": headings_used,
-                                    "chunk_strategy": strategy,
-                                    "script_model": script_model,
-                                }
-                            )
-                        except Exception as e:
-                            errors.append({"file": item["original_name"], "error": str(e)})
-                    write_job_manifest(manifest["job_id"], manifest)
-                elif prompt_text:
+                if prompt_text or skip_script:
                     try:
-                        client = get_openai_client()
-                    except Exception as e:
-                        flash(f"OpenAI configuration error: {e}", "danger")
-                    else:
-                        manifest["script_files"] = []
-                        for item in manifest.get("uploaded_files", []):
-                            input_path = Path(item["input_path"])
-                            job_script_dir = PODCAST_SCRIPT_DIR / manifest["job_id"]
-                            job_script_dir.mkdir(parents=True, exist_ok=True)
-                            if not input_path.exists():
-                                errors.append({"file": item["original_name"], "error": "Uploaded file missing."})
-                                continue
-                            text = input_path.read_text(encoding="utf-8-sig", errors="ignore")
-                            normalized_text = normalize_text(text)
-                            if not normalized_text.strip():
-                                errors.append({"file": item["original_name"], "error": "File is empty or unreadable."})
-                                continue
-                            try:
-                                print(f"📝 Generating script for {item['original_name']}")
-                                # Checked skip_script should never log Step 2.
-                                if auto_split:
-                                    chunks, strategy, headings_detected = split_text_with_metadata(
-                                        normalized_text,
-                                        max_chars=max_chars,
-                                    )
-                                else:
-                                    chunks = [normalized_text]
-                                    strategy = "none"
-                                    headings_detected = detect_heading_structure(normalized_text)
-                                headings_used = auto_split and headings_detected
-                                logger.info(
-                                    "[PODCAST] job_id=%s file=%s auto_split=%s max_chars=%s headings=%s chunks=%s skip_script=%s script_model=%s",
-                                    manifest["job_id"],
-                                    item["original_name"],
-                                    auto_split,
-                                    max_chars,
-                                    headings_detected,
-                                    len(chunks),
-                                    skip_script,
-                                    script_model,
-                                )
-                                if auto_split:
-                                    logger.info("[PODCAST] chunking strategy: %s", strategy)
-                                script_parts = []
-                                for index, chunk in enumerate(chunks, start=1):
-                                    try:
-                                        script_text = generate_podcast_script(
-                                            client,
-                                            chunk,
-                                            prompt_text,
-                                            tone,
-                                            model=script_model,
-                                        )
-                                        if not script_text:
-                                            raise ValueError("Script generation returned empty content.")
-                                        part_name = f"{item['base_name']}_script_part_{index:02d}.txt"
-                                        part_path = job_script_dir / part_name
-                                        part_path.write_text(script_text, encoding="utf-8")
-                                        script_parts.append(
-                                            {
-                                                "script_filename": f"{manifest['job_id']}/{part_name}",
-                                                "script_path": str(part_path),
-                                            }
-                                        )
-                                    except Exception as e:
-                                        errors.append(
-                                            {
-                                                "file": item["original_name"],
-                                                "error": f"Chunk {index:02d}: {e}",
-                                            }
-                                        )
-                                if not script_parts:
-                                    raise ValueError("Script generation returned no chunks.")
-                                full_name = f"{item['base_name']}_script_full.txt"
-                                full_path = job_script_dir / full_name
-                                full_path.write_text(
-                                    "\n\n".join(
-                                        Path(part["script_path"]).read_text(encoding="utf-8")
-                                        for part in script_parts
-                                    ),
-                                    encoding="utf-8",
-                                )
-                                manifest["script_files"].append(
-                                    {
-                                        "original_name": item["original_name"],
-                                        "base_name": item["base_name"],
-                                        "script_parts": script_parts,
-                                        "script_full_filename": f"{manifest['job_id']}/{full_name}",
-                                        "script_full_path": str(full_path),
-                                    "script_skipped": False,
-                                    "chunk_count": len(script_parts),
-                                    "auto_split": auto_split,
-                                    "max_chars": max_chars,
-                                    "headings_detected": headings_detected,
-                                    "headings_used": headings_used,
-                                    "chunk_strategy": strategy,
-                                    "script_model": script_model,
-                                }
-                            )
-                            except Exception as e:
-                                errors.append({"file": item["original_name"], "error": str(e)})
+                        update_job_status(
+                            manifest["job_id"],
+                            state="queued",
+                            current_file=None,
+                            current_chunk=0,
+                            total_chunks=0,
+                            last_message="Job queued.",
+                            errors=[],
+                            outputs={},
+                        )
+                        manifest["script_generation_state"] = "queued"
                         write_job_manifest(manifest["job_id"], manifest)
+                        SCRIPT_JOB_EXECUTOR.submit(
+                            process_script_job,
+                            manifest["job_id"],
+                            prompt_text,
+                            tone,
+                            script_model,
+                            skip_script,
+                        )
+                        flash("Script job started. Progress will update below.", "success")
+                    except Exception as e:
+                        flash(f"Failed to start script job: {e}", "danger")
 
         elif action == "save_audio_prompt":
             if not manifest:
@@ -1048,6 +1156,7 @@ def podcast():
         skip_script_checked = bool(manifest.get("script_skipped"))
     elif request.method == "POST":
         skip_script_checked = request.form.get("skip_script") in ("on", "true", "1", "yes", "checked")
+    job_status = load_job_status(job_id) if job_id else None
 
     return render_template(
         'yt/podcast.html',
@@ -1060,7 +1169,16 @@ def podcast():
         script_prompts=script_prompts,
         audio_prompts=audio_prompts,
         skip_script_checked=skip_script_checked,
+        job_status=job_status,
     )
+
+
+@yt_bp.route('/job/<job_id>/status')
+def podcast_job_status(job_id):
+    status = load_job_status(job_id)
+    if not status:
+        return {"state": "unknown", "last_message": "Status not found."}, 404
+    return status
 
 
 @yt_bp.route('/yt/podcast/download/<category>/<path:filename>')
