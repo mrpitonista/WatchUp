@@ -223,6 +223,12 @@
         <li><a href="{{ url_for('yt.open_folder', job_id=job_id, kind='scripts') }}">Open scripts folder</a></li>
         <li><a href="{{ url_for('yt.open_folder', job_id=job_id, kind='audio') }}">Open audio folder</a></li>
       </ul>
+      <h4>Open on your computer (SMB)</h4>
+      <ul>
+        <li><a href="{{ smb_base_url }}/inputs/" target="_blank" rel="noopener">Open inputs folder</a></li>
+        <li><a href="{{ smb_base_url }}/scripts/{{ job_id }}/" target="_blank" rel="noopener">Open scripts folder</a></li>
+        <li><a href="{{ smb_base_url }}/audio/{{ job_id }}/" target="_blank" rel="noopener">Open audio folder</a></li>
+      </ul>
     {% endif %}
   {% endif %}
 
