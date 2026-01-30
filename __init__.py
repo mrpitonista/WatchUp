@@ -28,6 +28,10 @@ PODCAST_AUDIO_DIR = PODCAST_ROOT / "audio"
 PODCAST_JOBS_DIR = PODCAST_ROOT / "jobs"
 PODCAST_OUTPUT_DIR = PODCAST_ROOT / "output"
 PODCAST_PROMPTS_PATH = PODCAST_ROOT / "podcast_prompts.json"
+SMB_BASE_URL = os.getenv(
+    "WATCHUP_SMB_BASE_URL",
+    "smb://MacMiniMedia._smb._tcp.local/Admin/YT_Dashboard/podcast_files",
+)
 
 PODCAST_ROOT.mkdir(exist_ok=True)
 PODCAST_UPLOAD_DIR.mkdir(exist_ok=True)
@@ -1207,6 +1211,7 @@ def podcast():
         audio_prompts=audio_prompts,
         skip_script_checked=skip_script_checked,
         job_status=job_status,
+        smb_base_url=SMB_BASE_URL.rstrip("/"),
     )
 
 
