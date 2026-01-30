@@ -334,11 +334,6 @@ def detect_heading_structure(text: str) -> bool:
     return any(re.match(r"^(# |## )", line) for line in text.split("\n"))
 
 
-def split_text_if_needed(text: str, max_chars: int = 7000) -> list[str]:
-    chunks, _strategy, _headings_used = split_text_with_metadata(text, max_chars=max_chars)
-    return chunks
-
-
 def split_text_with_metadata(text: str, max_chars: int = 7000) -> tuple[list[str], str, bool]:
     headings_used = detect_heading_structure(text)
     strategy_used = set()
@@ -515,6 +510,11 @@ def split_text_with_metadata(text: str, max_chars: int = 7000) -> tuple[list[str
     return paragraph_chunks, strategy, headings_used
 
 
+def split_for_tts(text: str, max_chars: int = 7000) -> list[str]:
+    chunks, _strategy, _headings_used = split_text_with_metadata(text, max_chars=max_chars)
+    return chunks
+
+
 def clamp_max_chars(value: int, minimum: int = 3000, maximum: int = 12000) -> int:
     return max(minimum, min(maximum, value))
 
@@ -621,17 +621,10 @@ def process_script_job(
                 errors.append(error)
                 update_job_status(job_id, errors=errors, last_message=error["error"])
                 continue
-            if auto_split:
-                chunks, strategy, headings_detected = split_text_with_metadata(
-                    normalized_text,
-                    max_chars=max_chars,
-                )
-            else:
-                chunks = [normalized_text]
-                strategy = "none"
-                headings_detected = detect_heading_structure(normalized_text)
-            headings_used = auto_split and headings_detected
-            log_chunk_warning(job_id, item["original_name"], len(chunks), max_chars)
+            chunks = [normalized_text]
+            strategy = "none"
+            headings_detected = detect_heading_structure(normalized_text)
+            headings_used = False
             logger.info(
                 "[PODCAST] job_id=%s file=%s auto_split=%s max_chars=%s headings=%s chunks=%s skip_script=%s script_model=%s",
                 job_id,
@@ -643,96 +636,58 @@ def process_script_job(
                 skip_script,
                 script_model,
             )
-            if auto_split:
-                logger.info("[PODCAST] chunking strategy: %s", strategy)
             update_job_status(
                 job_id,
                 current_file=item["original_name"],
                 current_chunk=0,
-                total_chunks=len(chunks),
-                last_message=f"Processing {item['original_name']} ({len(chunks)} chunks).",
+                total_chunks=1,
+                last_message=f"Script generation: 0/1 for {item['original_name']}.",
             )
             script_parts = []
-            for index, chunk in enumerate(chunks, start=1):
-                update_job_status(
-                    job_id,
-                    current_chunk=index,
-                    last_message=f"Chunk {index:02d}/{len(chunks)} for {item['original_name']}.",
-                )
-                if skip_script:
-                    part_name = f"{item['base_name']}_script_part_{index:02d}.txt"
-                    part_path = job_script_dir / part_name
-                    part_path.write_text(chunk, encoding="utf-8")
-                    script_parts.append(
-                        {
-                            "script_filename": f"{job_id}/{part_name}",
-                            "script_path": str(part_path),
-                        }
-                    )
-                    continue
+            if skip_script:
+                script_text = normalized_text
+                full_name = f"{item['base_name']}_full_script_source.txt"
+                logger.info("[SCRIPT] single-pass model=source chars=%s", len(script_text))
+            else:
                 start_time = datetime.now()
-                logger.info(
-                    "[PODCAST] job_id=%s file=%s chunk=%02d/%02d START %s",
-                    job_id,
-                    item["original_name"],
-                    index,
-                    len(chunks),
-                    start_time.isoformat(),
-                )
+                logger.info("[SCRIPT] single-pass model=%s chars=%s", script_model, len(normalized_text))
                 try:
                     chunk_client = client.with_options(timeout=SCRIPT_CHUNK_TIMEOUT, max_retries=SCRIPT_MAX_RETRIES)
                     script_text = generate_podcast_script(
                         chunk_client,
-                        chunk,
+                        normalized_text,
                         prompt_text,
                         tone,
                         model=script_model,
                     )
                     if not script_text:
                         raise ValueError("Script generation returned empty content.")
-                    part_name = f"{item['base_name']}_script_part_{index:02d}.txt"
-                    part_path = job_script_dir / part_name
-                    part_path.write_text(script_text, encoding="utf-8")
-                    script_parts.append(
-                        {
-                            "script_filename": f"{job_id}/{part_name}",
-                            "script_path": str(part_path),
-                        }
-                    )
-                    duration = (datetime.now() - start_time).total_seconds()
-                    logger.info(
-                        "[PODCAST] job_id=%s file=%s chunk=%02d/%02d END %.2fs",
-                        job_id,
-                        item["original_name"],
-                        index,
-                        len(chunks),
-                        duration,
-                    )
                 except Exception as e:
                     duration = (datetime.now() - start_time).total_seconds()
-                    error_message = f"Chunk {index:02d} failed after {duration:.2f}s: {e}"
+                    error_message = f"Script generation failed after {duration:.2f}s: {e}"
                     logger.error(
-                        "[PODCAST] job_id=%s file=%s chunk=%02d/%02d ERROR %s",
+                        "[PODCAST] job_id=%s file=%s ERROR %s",
                         job_id,
                         item["original_name"],
-                        index,
-                        len(chunks),
                         error_message,
                     )
-                    write_chunk_error_file(job_script_dir, item["base_name"], index, error_message)
                     errors.append({"file": item["original_name"], "error": error_message})
                     update_job_status(job_id, errors=errors, last_message=error_message)
                     continue
-            if not script_parts:
-                error = {"file": item["original_name"], "error": "Script generation returned no chunks."}
-                errors.append(error)
-                update_job_status(job_id, errors=errors, last_message=error["error"])
-                continue
-            full_name = f"{item['base_name']}_script_full.txt"
+                duration = (datetime.now() - start_time).total_seconds()
+                logger.info(
+                    "[PODCAST] job_id=%s file=%s single-pass END %.2fs",
+                    job_id,
+                    item["original_name"],
+                    duration,
+                )
+                full_name = f"{item['base_name']}_full_script_{script_model}.txt"
             full_path = job_script_dir / full_name
-            full_path.write_text(
-                "\n\n".join(Path(part["script_path"]).read_text(encoding="utf-8") for part in script_parts),
-                encoding="utf-8",
+            full_path.write_text(script_text, encoding="utf-8")
+            update_job_status(
+                job_id,
+                current_chunk=1,
+                last_message=f"Script generation: 1/1 for {item['original_name']}.",
             )
             script_files.append(
                 {
@@ -742,7 +697,7 @@ def process_script_job(
                     "script_full_filename": f"{job_id}/{full_name}",
                     "script_full_path": str(full_path),
                     "script_skipped": skip_script,
-                    "chunk_count": len(script_parts),
+                    "chunk_count": 1,
                     "auto_split": auto_split,
                     "max_chars": max_chars,
                     "headings_detected": headings_detected,
@@ -1143,29 +1098,51 @@ def podcast():
                             job_audio_dir = PODCAST_AUDIO_DIR / manifest["job_id"]
                             job_audio_dir.mkdir(parents=True, exist_ok=True)
                             audio_parts = []
-                            for index, part in enumerate(item.get("script_parts", []), start=1):
-                                script_path = Path(part["script_path"])
-                                if not script_path.exists():
-                                    errors.append(
-                                        {
-                                            "file": item["original_name"],
-                                            "error": f"Script part missing: {script_path.name}",
-                                        }
-                                    )
-                                    continue
-                                script_text = script_path.read_text(encoding="utf-8-sig", errors="ignore")
-                                if not script_text.strip():
-                                    errors.append(
-                                        {
-                                            "file": item["original_name"],
-                                            "error": f"Script part empty: {script_path.name}",
-                                        }
-                                    )
-                                    continue
+                            script_path = Path(item.get("script_full_path", ""))
+                            if not script_path.exists():
+                                errors.append(
+                                    {
+                                        "file": item["original_name"],
+                                        "error": f"Script file missing: {script_path.name}",
+                                    }
+                                )
+                                continue
+                            script_text = script_path.read_text(encoding="utf-8-sig", errors="ignore")
+                            if not script_text.strip():
+                                errors.append(
+                                    {
+                                        "file": item["original_name"],
+                                        "error": f"Script file empty: {script_path.name}",
+                                    }
+                                )
+                                continue
+                            auto_split = bool(item.get("auto_split", True))
+                            max_chars = clamp_max_chars(int(item.get("max_chars", 7000)))
+                            tts_chunks = split_for_tts(script_text, max_chars=max_chars) if auto_split else [script_text]
+                            logger.info(
+                                "[TTS] splitting full script into %s chunks, max_chars=%s",
+                                len(tts_chunks),
+                                max_chars,
+                            )
+                            update_job_status(
+                                manifest["job_id"],
+                                state="running",
+                                current_file=item["original_name"],
+                                current_chunk=0,
+                                total_chunks=len(tts_chunks),
+                                last_message=f"TTS chunk 0/{len(tts_chunks)} for {item['original_name']}.",
+                            )
+                            log_chunk_warning(manifest["job_id"], item["original_name"], len(tts_chunks), max_chars)
+                            for index, chunk in enumerate(tts_chunks, start=1):
+                                update_job_status(
+                                    manifest["job_id"],
+                                    current_chunk=index,
+                                    last_message=f"TTS chunk {index}/{len(tts_chunks)} for {item['original_name']}.",
+                                )
                                 try:
                                     audio_name = f"{item['base_name']}_part_{index:02d}.mp3"
                                     audio_path = job_audio_dir / audio_name
-                                    audio_bytes = tts_generate_audio(client, script_text, voice, prompt_text)
+                                    audio_bytes = tts_generate_audio(client, chunk, voice, prompt_text)
                                     audio_path.write_bytes(audio_bytes)
                                     audio_parts.append(
                                         {
@@ -1173,7 +1150,7 @@ def podcast():
                                             "audio_path": str(audio_path),
                                         }
                                     )
-                                    logger.info("[PODCAST] part %02d/%02d TTS OK -> %s", index, len(item.get("script_parts", [])), audio_path)
+                                    logger.info("[TTS] part %02d/%02d OK -> %s", index, len(tts_chunks), audio_path)
                                 except Exception as e:
                                     errors.append(
                                         {
@@ -1191,6 +1168,8 @@ def podcast():
                                 if merge_error:
                                     errors.append({"file": item["original_name"], "error": merge_error})
                                 audio_full_name = None
+                            else:
+                                logger.info("[TTS] merge OK -> %s", audio_full_path)
                             manifest["audio_files"].append(
                                 {
                                     "original_name": item["original_name"],
@@ -1199,7 +1178,7 @@ def podcast():
                                     "audio_full_path": str(audio_full_path) if audio_full_name else None,
                                     "script_full_filename": item.get("script_full_filename"),
                                     "script_skipped": item.get("script_skipped", False),
-                                    "chunk_count": item.get("chunk_count", len(audio_parts)),
+                                    "chunk_count": len(audio_parts),
                                     "auto_split": item.get("auto_split", False),
                                     "max_chars": item.get("max_chars"),
                                     "headings_detected": item.get("headings_detected", False),
