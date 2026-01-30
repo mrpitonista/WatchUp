@@ -87,6 +87,26 @@
     </form>
   {% endif %}
 
+  {% if current_step == 3 %}
+    <h2>Step 3: Script Generation</h2>
+    <p>Job started. This page will update automatically.</p>
+    <div id="jobStatusPanel">
+      <p><strong>Status:</strong> <span id="jobState">{{ job_status.state if job_status else 'queued' }}</span></p>
+      <p><strong>Current file:</strong> <span id="jobFile">{{ job_status.current_file if job_status else '' }}</span></p>
+      <p><strong>Chunk:</strong> <span id="jobChunk">{{ job_status.current_chunk if job_status else 0 }}</span> / <span id="jobTotalChunks">{{ job_status.total_chunks if job_status else 0 }}</span></p>
+      <p><strong>Last message:</strong> <span id="jobMessage">{{ job_status.last_message if job_status else '' }}</span></p>
+    </div>
+    <div id="jobErrors" style="display: none;">
+      <h3>Errors</h3>
+      <ul id="jobErrorList"></ul>
+    </div>
+    <div id="jobComplete" style="display: none;">
+      {% if job_id %}
+        <a href="{{ url_for('yt.podcast', job_id=job_id) }}">View scripts</a>
+      {% endif %}
+    </div>
+  {% endif %}
+
   {% if current_step == 4 %}
     <h2>Step 4: Scripts</h2>
     {% if manifest and manifest.script_files %}
@@ -210,6 +230,7 @@
   <script>
     const scriptPrompts = {{ script_prompts | tojson }};
     const audioPrompts = {{ audio_prompts | tojson }};
+    const jobId = {{ job_id | tojson }};
 
     function updatePromptText(selectId, textareaId, prompts) {
       const select = document.getElementById(selectId);
@@ -240,6 +261,51 @@
           }
         });
       });
+
+      if (jobId && document.getElementById("jobStatusPanel")) {
+        const stateEl = document.getElementById("jobState");
+        const fileEl = document.getElementById("jobFile");
+        const chunkEl = document.getElementById("jobChunk");
+        const totalEl = document.getElementById("jobTotalChunks");
+        const msgEl = document.getElementById("jobMessage");
+        const errorsBox = document.getElementById("jobErrors");
+        const errorList = document.getElementById("jobErrorList");
+        const completeBox = document.getElementById("jobComplete");
+
+        const updateErrors = (errors) => {
+          if (!errors || errors.length === 0) {
+            errorsBox.style.display = "none";
+            return;
+          }
+          errorList.innerHTML = "";
+          errors.forEach((err) => {
+            const li = document.createElement("li");
+            li.textContent = `${err.file}: ${err.error}`;
+            errorList.appendChild(li);
+          });
+          errorsBox.style.display = "block";
+        };
+
+        const pollStatus = () => {
+          fetch(`/job/${jobId}/status`)
+            .then((response) => response.json())
+            .then((data) => {
+              stateEl.textContent = data.state || "";
+              fileEl.textContent = data.current_file || "";
+              chunkEl.textContent = data.current_chunk ?? 0;
+              totalEl.textContent = data.total_chunks ?? 0;
+              msgEl.textContent = data.last_message || "";
+              updateErrors(data.errors || []);
+              if (data.state === "done") {
+                completeBox.style.display = "block";
+              }
+            })
+            .catch(() => {});
+        };
+
+        pollStatus();
+        setInterval(pollStatus, 1500);
+      }
     });
   </script>
 </body>
