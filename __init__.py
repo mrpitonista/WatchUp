@@ -3,6 +3,7 @@ import subprocess
 import os
 import shutil
 import logging
+import re
 from config import DOWNLOAD_FOLDERS
 
 from pathlib import Path
@@ -19,14 +20,14 @@ history_path = this_dir / "download_history.json"
 logger = logging.getLogger(__name__)
 
 PODCAST_ROOT = this_dir / "podcast_files"
-PODCAST_INPUT_DIR = PODCAST_ROOT / "inputs"
+PODCAST_UPLOAD_DIR = PODCAST_ROOT / "uploads"
 PODCAST_SCRIPT_DIR = PODCAST_ROOT / "scripts"
 PODCAST_AUDIO_DIR = PODCAST_ROOT / "audio"
 PODCAST_JOBS_DIR = PODCAST_ROOT / "jobs"
 PODCAST_PROMPTS_PATH = PODCAST_ROOT / "podcast_prompts.json"
 
 PODCAST_ROOT.mkdir(exist_ok=True)
-PODCAST_INPUT_DIR.mkdir(exist_ok=True)
+PODCAST_UPLOAD_DIR.mkdir(exist_ok=True)
 PODCAST_SCRIPT_DIR.mkdir(exist_ok=True)
 PODCAST_AUDIO_DIR.mkdir(exist_ok=True)
 PODCAST_JOBS_DIR.mkdir(exist_ok=True)
@@ -147,10 +148,16 @@ def render_script_prompt(prompt_text: str, tone: str) -> str:
     return prompt_text
 
 
-def generate_podcast_script(client: OpenAI, text: str, prompt_text: str, tone: str) -> str:
+def generate_podcast_script(
+    client: OpenAI,
+    text: str,
+    prompt_text: str,
+    tone: str,
+    model: str | None = None,
+) -> str:
     system_prompt = render_script_prompt(prompt_text, tone)
     response = client.chat.completions.create(
-        model=SCRIPT_MODEL,
+        model=model or SCRIPT_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": text},
@@ -240,6 +247,201 @@ def normalize_tone(value: str | None) -> str:
     if value in TONE_OPTIONS:
         return value
     return TONE_OPTIONS[0]
+
+
+def normalize_text(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = "\n".join(re.sub(r"[ \t]+", " ", line.strip()) for line in normalized.split("\n"))
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
+
+
+def detect_heading_structure(text: str) -> bool:
+    return any(re.match(r"^(# |## )", line) for line in text.split("\n"))
+
+
+def split_text_if_needed(text: str, max_chars: int = 7000) -> list[str]:
+    chunks, _strategy, _headings_used = split_text_with_metadata(text, max_chars=max_chars)
+    return chunks
+
+
+def split_text_with_metadata(text: str, max_chars: int = 7000) -> tuple[list[str], str, bool]:
+    headings_used = detect_heading_structure(text)
+    strategy_used = set()
+
+    def hard_cut(value: str, limit: int) -> list[str]:
+        return [value[i : i + limit] for i in range(0, len(value), limit)]
+
+    def split_paragraph(paragraph: str, limit: int) -> list[str]:
+        if len(paragraph) <= limit:
+            return [paragraph]
+        strategy_used.add("sentences")
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", paragraph) if s.strip()]
+        if not sentences:
+            strategy_used.add("hardcut")
+            return hard_cut(paragraph, limit)
+        chunks = []
+        current = ""
+        for sentence in sentences:
+            candidate = sentence if not current else f"{current} {sentence}"
+            if len(candidate) <= limit:
+                current = candidate
+            else:
+                if current:
+                    chunks.append(current)
+                if len(sentence) > limit:
+                    strategy_used.add("hardcut")
+                    chunks.extend(hard_cut(sentence, limit))
+                    current = ""
+                else:
+                    current = sentence
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def split_body_into_chunks(body: str, limit: int) -> list[str]:
+        if not body:
+            return []
+        paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+        chunks = []
+        for paragraph in paragraphs:
+            chunks.extend(split_paragraph(paragraph, limit))
+        return chunks
+
+    def extract_heading_prefix(unit_text: str) -> tuple[str, str]:
+        lines = unit_text.split("\n")
+        heading_lines = []
+        for line in lines:
+            if line.startswith("# ") or line.startswith("## "):
+                heading_lines.append(line)
+            else:
+                break
+        if not heading_lines:
+            return "", unit_text
+        body = "\n".join(lines[len(heading_lines) :]).lstrip()
+        return "\n".join(heading_lines), body
+
+    def combine_with_prefix(body_chunks: list[str], prefix: str, limit: int) -> list[str]:
+        if not body_chunks:
+            return [prefix] if prefix else []
+        continuation = "(continued)" if prefix else ""
+        combined = []
+        for index, chunk in enumerate(body_chunks):
+            if index == 0 and prefix:
+                combined.append(f"{prefix}\n\n{chunk}".strip())
+            elif continuation:
+                combined.append(f"{continuation}\n\n{chunk}".strip())
+            else:
+                combined.append(chunk.strip())
+        return combined
+
+    def split_unit_with_fallback(unit_text: str) -> list[str]:
+        if len(unit_text) <= max_chars:
+            return [unit_text.strip()]
+        prefix, body = extract_heading_prefix(unit_text)
+        available = max_chars
+        if prefix:
+            first_limit = max_chars - len(prefix) - 2
+            continuation_limit = max_chars - len("(continued)") - 2
+            available = max(1, min(first_limit, continuation_limit))
+        body_chunks = split_body_into_chunks(body, available)
+        if not body_chunks and body:
+            strategy_used.add("hardcut")
+            body_chunks = hard_cut(body, available)
+        return combine_with_prefix(body_chunks or [""] if prefix else body_chunks, prefix, available)
+
+    if len(text) <= max_chars:
+        return [text.strip()], "headings" if headings_used else "paragraphs", headings_used
+
+    if headings_used:
+        units = []
+        current_chapter = None
+        current_lines = []
+        for line in text.split("\n"):
+            if line.startswith("# "):
+                if current_lines:
+                    units.append("\n".join(current_lines).strip())
+                current_chapter = line.strip()
+                current_lines = [current_chapter]
+            elif line.startswith("## "):
+                if current_lines and current_lines != [current_chapter]:
+                    units.append("\n".join(current_lines).strip())
+                    current_lines = []
+                if current_chapter:
+                    current_lines = [current_chapter, line.strip()]
+                else:
+                    current_lines = [line.strip()]
+            else:
+                if current_lines:
+                    current_lines.append(line)
+                else:
+                    current_lines = [line]
+        if current_lines:
+            units.append("\n".join(current_lines).strip())
+        packed = []
+        current = ""
+        for unit in units:
+            unit_chunks = split_unit_with_fallback(unit)
+            for unit_chunk in unit_chunks:
+                candidate = unit_chunk if not current else f"{current}\n\n{unit_chunk}"
+                if len(candidate) <= max_chars:
+                    current = candidate
+                else:
+                    if current:
+                        packed.append(current.strip())
+                    current = unit_chunk
+        if current:
+            packed.append(current.strip())
+        strategy = "hardcut" if "hardcut" in strategy_used else "sentences" if "sentences" in strategy_used else "headings"
+        return packed, strategy, headings_used
+
+    strategy_used.add("paragraphs")
+    paragraph_chunks = split_unit_with_fallback(text)
+    strategy = "hardcut" if "hardcut" in strategy_used else "sentences" if "sentences" in strategy_used else "paragraphs"
+    return paragraph_chunks, strategy, headings_used
+
+
+def clamp_max_chars(value: int, minimum: int = 3000, maximum: int = 12000) -> int:
+    return max(minimum, min(maximum, value))
+
+
+def merge_mp3_parts_ffmpeg(part_paths: list[Path], out_path: Path) -> tuple[bool, str]:
+    if not part_paths:
+        return False, "No audio parts to merge."
+    if shutil.which("ffmpeg") is None:
+        return False, "ffmpeg is required to merge audio parts."
+    concat_list_path = out_path.parent / f"{out_path.stem}_concat.txt"
+    try:
+        concat_list_path.write_text(
+            "\n".join(f"file '{path.as_posix()}'" for path in part_paths),
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_list_path),
+                "-c",
+                "copy",
+                str(out_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.error("[PODCAST] ffmpeg merge failed: %s", result.stderr.strip())
+            return False, result.stderr.strip() or "ffmpeg merge failed."
+        logger.info("[PODCAST] ffmpeg merge OK -> %s", out_path)
+        return True, ""
+    finally:
+        if concat_list_path.exists():
+            concat_list_path.unlink()
 
 # Background downloader with progress tracking
 def run_download_and_track(cmd, uid):
@@ -363,16 +565,25 @@ def podcast():
         flash("Podcast job not found. Please start again.", "danger")
         job_id = None
 
-    # Smoke test path:
-    # - upload 2 files with skip off (expect script + audio)
-    # - upload 2 files with skip on (expect uploaded text as script + audio)
-    # - mixed failures: one file empty should error but the other succeeds
+    # Manual test notes:
+    # - file with #/## headings splits along those first
+    # - file without headings splits by paragraphs
+    # - very long subchapter further splits by sentences/hardcut
+    # - skip_script ON never triggers OpenAI script generation
+    # - switching script_model changes ONLY the script generation request model parameter
     if request.method == 'POST':
         action = request.form.get("action")
 
         if action == "start":
             files = request.files.getlist("files")
             skip_script = request.form.get("skip_script") in ("on", "true", "1", "yes", "checked")
+            auto_split_raw = request.form.get("auto_split")
+            auto_split = auto_split_raw in ("on", "true", "1", "yes")
+            max_chars_raw = request.form.get("max_chars", "7000")
+            try:
+                max_chars = clamp_max_chars(int(max_chars_raw))
+            except ValueError:
+                max_chars = 7000
             logger.info(f"[PODCAST] skip_script={skip_script} raw={request.form.get('skip_script')}")
             logger.debug("[PODCAST] skip_script flag received during start action.")
             if not files or all(not f.filename for f in files):
@@ -381,6 +592,8 @@ def podcast():
                 flash(f"Please upload no more than {MAX_PODCAST_FILES} files per request.", "danger")
             else:
                 job_id = uuid.uuid4().hex[:12]
+                job_upload_dir = PODCAST_UPLOAD_DIR / job_id
+                job_upload_dir.mkdir(parents=True, exist_ok=True)
                 manifest = {
                     "job_id": job_id,
                     "created_at": datetime.now().isoformat(),
@@ -388,6 +601,8 @@ def podcast():
                     "script_files": [],
                     "audio_files": [],
                     "script_skipped": skip_script,
+                    "auto_split": auto_split,
+                    "max_chars": max_chars,
                     "selected_tone": TONE_OPTIONS[0],
                     "selected_voice": DEFAULT_VOICE,
                     "selected_script_prompt_name": None,
@@ -403,11 +618,14 @@ def podcast():
                         errors.append({"file": safe_name, "error": "Only .txt and .md files are allowed."})
                         continue
 
-                    unique_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
                     base_name = Path(safe_name).stem
                     suffix = Path(safe_name).suffix.lower()
-                    input_name = f"{base_name}_{unique_id}{suffix}"
-                    input_path = PODCAST_INPUT_DIR / input_name
+                    input_name = safe_name
+                    input_path = job_upload_dir / input_name
+                    if input_path.exists():
+                        unique_id = uuid.uuid4().hex[:6]
+                        input_name = f"{base_name}_{unique_id}{suffix}"
+                        input_path = job_upload_dir / input_name
 
                     try:
                         upload.save(input_path)
@@ -417,6 +635,7 @@ def podcast():
                                 "input_filename": input_name,
                                 "input_path": str(input_path),
                                 "base_name": base_name,
+                                "job_id": job_id,
                             }
                         )
                     except Exception as e:
@@ -483,8 +702,15 @@ def podcast():
                 selected_name = request.form.get("selected_script_prompt") or ""
                 prompt_text = request.form.get("script_prompt_text", "").strip()
                 tone = normalize_tone(request.form.get("tone"))
+                script_model = request.form.get("script_model", SCRIPT_MODEL)
+                if script_model not in {"gpt-4o-mini", "gpt-5-mini"}:
+                    script_model = "gpt-4o-mini"
+                # Cost note: gpt-5-mini is ~1.67x input and ~3.33x output vs gpt-4o-mini (use intentionally)
                 manifest["selected_tone"] = tone
                 manifest["selected_script_prompt_name"] = selected_name or manifest.get("selected_script_prompt_name")
+                manifest["selected_script_model"] = script_model
+                auto_split = bool(manifest.get("auto_split", True))
+                max_chars = clamp_max_chars(int(manifest.get("max_chars", 7000)))
                 if not skip_script:
                     if not prompt_text and selected_name:
                         prompt = prompt_lookup(script_prompts, selected_name)
@@ -496,26 +722,70 @@ def podcast():
                     manifest["script_files"] = []
                     for item in manifest.get("uploaded_files", []):
                         input_path = Path(item["input_path"])
+                        job_script_dir = PODCAST_SCRIPT_DIR / manifest["job_id"]
+                        job_script_dir.mkdir(parents=True, exist_ok=True)
                         if not input_path.exists():
                             errors.append({"file": item["original_name"], "error": "Uploaded file missing."})
                             continue
                         text = input_path.read_text(encoding="utf-8-sig", errors="ignore")
-                        if not text.strip():
+                        normalized_text = normalize_text(text)
+                        if not normalized_text.strip():
                             errors.append({"file": item["original_name"], "error": "File is empty or unreadable."})
                             continue
                         try:
                             print(f"⏭️ Skipping script generation for {item['original_name']}")
-                            script_text = text
-                            script_name = f"{item['base_name']}_{manifest['job_id']}_podcast_script.txt"
-                            script_path = PODCAST_SCRIPT_DIR / script_name
-                            script_path.write_text(script_text, encoding="utf-8")
+                            if auto_split:
+                                chunks, strategy, headings_detected = split_text_with_metadata(
+                                    normalized_text,
+                                    max_chars=max_chars,
+                                )
+                            else:
+                                chunks = [normalized_text]
+                                strategy = "none"
+                                headings_detected = detect_heading_structure(normalized_text)
+                            headings_used = auto_split and headings_detected
+                            logger.info(
+                                "[PODCAST] job_id=%s file=%s auto_split=%s max_chars=%s headings=%s chunks=%s skip_script=%s script_model=%s",
+                                manifest["job_id"],
+                                item["original_name"],
+                                auto_split,
+                                max_chars,
+                                headings_detected,
+                                len(chunks),
+                                skip_script,
+                                script_model,
+                            )
+                            if auto_split:
+                                logger.info("[PODCAST] chunking strategy: %s", strategy)
+                            script_parts = []
+                            for index, chunk in enumerate(chunks, start=1):
+                                part_name = f"{item['base_name']}_script_part_{index:02d}.txt"
+                                part_path = job_script_dir / part_name
+                                part_path.write_text(chunk, encoding="utf-8")
+                                script_parts.append(
+                                    {
+                                        "script_filename": f"{manifest['job_id']}/{part_name}",
+                                        "script_path": str(part_path),
+                                    }
+                                )
+                            full_name = f"{item['base_name']}_script_full.txt"
+                            full_path = job_script_dir / full_name
+                            full_path.write_text("\n\n".join(chunks), encoding="utf-8")
                             manifest["script_files"].append(
                                 {
                                     "original_name": item["original_name"],
                                     "base_name": item["base_name"],
-                                    "script_filename": script_name,
-                                    "script_path": str(script_path),
+                                    "script_parts": script_parts,
+                                    "script_full_filename": f"{manifest['job_id']}/{full_name}",
+                                    "script_full_path": str(full_path),
                                     "script_skipped": True,
+                                    "chunk_count": len(chunks),
+                                    "auto_split": auto_split,
+                                    "max_chars": max_chars,
+                                    "headings_detected": headings_detected,
+                                    "headings_used": headings_used,
+                                    "chunk_strategy": strategy,
+                                    "script_model": script_model,
                                 }
                             )
                         except Exception as e:
@@ -530,31 +800,98 @@ def podcast():
                         manifest["script_files"] = []
                         for item in manifest.get("uploaded_files", []):
                             input_path = Path(item["input_path"])
+                            job_script_dir = PODCAST_SCRIPT_DIR / manifest["job_id"]
+                            job_script_dir.mkdir(parents=True, exist_ok=True)
                             if not input_path.exists():
                                 errors.append({"file": item["original_name"], "error": "Uploaded file missing."})
                                 continue
                             text = input_path.read_text(encoding="utf-8-sig", errors="ignore")
-                            if not text.strip():
+                            normalized_text = normalize_text(text)
+                            if not normalized_text.strip():
                                 errors.append({"file": item["original_name"], "error": "File is empty or unreadable."})
                                 continue
                             try:
                                 print(f"📝 Generating script for {item['original_name']}")
                                 # Checked skip_script should never log Step 2.
-                                script_text = generate_podcast_script(client, text, prompt_text, tone)
-                                if not script_text:
-                                    raise ValueError("Script generation returned empty content.")
-                                script_name = f"{item['base_name']}_{manifest['job_id']}_podcast_script.txt"
-                                script_path = PODCAST_SCRIPT_DIR / script_name
-                                script_path.write_text(script_text, encoding="utf-8")
+                                if auto_split:
+                                    chunks, strategy, headings_detected = split_text_with_metadata(
+                                        normalized_text,
+                                        max_chars=max_chars,
+                                    )
+                                else:
+                                    chunks = [normalized_text]
+                                    strategy = "none"
+                                    headings_detected = detect_heading_structure(normalized_text)
+                                headings_used = auto_split and headings_detected
+                                logger.info(
+                                    "[PODCAST] job_id=%s file=%s auto_split=%s max_chars=%s headings=%s chunks=%s skip_script=%s script_model=%s",
+                                    manifest["job_id"],
+                                    item["original_name"],
+                                    auto_split,
+                                    max_chars,
+                                    headings_detected,
+                                    len(chunks),
+                                    skip_script,
+                                    script_model,
+                                )
+                                if auto_split:
+                                    logger.info("[PODCAST] chunking strategy: %s", strategy)
+                                script_parts = []
+                                for index, chunk in enumerate(chunks, start=1):
+                                    try:
+                                        script_text = generate_podcast_script(
+                                            client,
+                                            chunk,
+                                            prompt_text,
+                                            tone,
+                                            model=script_model,
+                                        )
+                                        if not script_text:
+                                            raise ValueError("Script generation returned empty content.")
+                                        part_name = f"{item['base_name']}_script_part_{index:02d}.txt"
+                                        part_path = job_script_dir / part_name
+                                        part_path.write_text(script_text, encoding="utf-8")
+                                        script_parts.append(
+                                            {
+                                                "script_filename": f"{manifest['job_id']}/{part_name}",
+                                                "script_path": str(part_path),
+                                            }
+                                        )
+                                    except Exception as e:
+                                        errors.append(
+                                            {
+                                                "file": item["original_name"],
+                                                "error": f"Chunk {index:02d}: {e}",
+                                            }
+                                        )
+                                if not script_parts:
+                                    raise ValueError("Script generation returned no chunks.")
+                                full_name = f"{item['base_name']}_script_full.txt"
+                                full_path = job_script_dir / full_name
+                                full_path.write_text(
+                                    "\n\n".join(
+                                        Path(part["script_path"]).read_text(encoding="utf-8")
+                                        for part in script_parts
+                                    ),
+                                    encoding="utf-8",
+                                )
                                 manifest["script_files"].append(
                                     {
                                         "original_name": item["original_name"],
                                         "base_name": item["base_name"],
-                                        "script_filename": script_name,
-                                        "script_path": str(script_path),
-                                        "script_skipped": False,
-                                    }
-                                )
+                                        "script_parts": script_parts,
+                                        "script_full_filename": f"{manifest['job_id']}/{full_name}",
+                                        "script_full_path": str(full_path),
+                                    "script_skipped": False,
+                                    "chunk_count": len(script_parts),
+                                    "auto_split": auto_split,
+                                    "max_chars": max_chars,
+                                    "headings_detected": headings_detected,
+                                    "headings_used": headings_used,
+                                    "chunk_strategy": strategy,
+                                    "script_model": script_model,
+                                }
+                            )
                             except Exception as e:
                                 errors.append({"file": item["original_name"], "error": str(e)})
                         write_job_manifest(manifest["job_id"], manifest)
@@ -627,30 +964,74 @@ def podcast():
                     else:
                         manifest["audio_files"] = []
                         for item in manifest.get("script_files", []):
-                            script_path = Path(item["script_path"])
-                            if not script_path.exists():
-                                errors.append({"file": item["script_filename"], "error": "Script file missing."})
-                                continue
-                            script_text = script_path.read_text(encoding="utf-8-sig", errors="ignore")
-                            if not script_text.strip():
-                                errors.append({"file": item["script_filename"], "error": "Script file is empty."})
-                                continue
-                            try:
-                                audio_name = f"{item['base_name']}_{manifest['job_id']}.mp3"
-                                audio_path = PODCAST_AUDIO_DIR / audio_name
-                                audio_bytes = tts_generate_audio(client, script_text, voice, prompt_text)
-                                audio_path.write_bytes(audio_bytes)
-                                manifest["audio_files"].append(
-                                    {
-                                        "original_name": item["original_name"],
-                                        "audio_filename": audio_name,
-                                        "audio_path": str(audio_path),
-                                        "script_filename": item["script_filename"],
-                                        "script_skipped": item.get("script_skipped", False),
-                                    }
-                                )
-                            except Exception as e:
-                                errors.append({"file": item["script_filename"], "error": str(e)})
+                            job_audio_dir = PODCAST_AUDIO_DIR / manifest["job_id"]
+                            job_audio_dir.mkdir(parents=True, exist_ok=True)
+                            audio_parts = []
+                            for index, part in enumerate(item.get("script_parts", []), start=1):
+                                script_path = Path(part["script_path"])
+                                if not script_path.exists():
+                                    errors.append(
+                                        {
+                                            "file": item["original_name"],
+                                            "error": f"Script part missing: {script_path.name}",
+                                        }
+                                    )
+                                    continue
+                                script_text = script_path.read_text(encoding="utf-8-sig", errors="ignore")
+                                if not script_text.strip():
+                                    errors.append(
+                                        {
+                                            "file": item["original_name"],
+                                            "error": f"Script part empty: {script_path.name}",
+                                        }
+                                    )
+                                    continue
+                                try:
+                                    audio_name = f"{item['base_name']}_part_{index:02d}.mp3"
+                                    audio_path = job_audio_dir / audio_name
+                                    audio_bytes = tts_generate_audio(client, script_text, voice, prompt_text)
+                                    audio_path.write_bytes(audio_bytes)
+                                    audio_parts.append(
+                                        {
+                                            "audio_filename": f"{manifest['job_id']}/{audio_name}",
+                                            "audio_path": str(audio_path),
+                                        }
+                                    )
+                                    logger.info("[PODCAST] part %02d/%02d TTS OK -> %s", index, len(item.get("script_parts", [])), audio_path)
+                                except Exception as e:
+                                    errors.append(
+                                        {
+                                            "file": item["original_name"],
+                                            "error": f"TTS part {index:02d}: {e}",
+                                        }
+                                    )
+                            audio_full_name = f"{item['base_name']}_full.mp3"
+                            audio_full_path = job_audio_dir / audio_full_name
+                            merge_ok, merge_error = merge_mp3_parts_ffmpeg(
+                                [Path(part["audio_path"]) for part in audio_parts],
+                                audio_full_path,
+                            )
+                            if not merge_ok:
+                                if merge_error:
+                                    errors.append({"file": item["original_name"], "error": merge_error})
+                                audio_full_name = None
+                            manifest["audio_files"].append(
+                                {
+                                    "original_name": item["original_name"],
+                                    "audio_parts": audio_parts,
+                                    "audio_full_filename": f"{manifest['job_id']}/{audio_full_name}" if audio_full_name else None,
+                                    "audio_full_path": str(audio_full_path) if audio_full_name else None,
+                                    "script_full_filename": item.get("script_full_filename"),
+                                    "script_skipped": item.get("script_skipped", False),
+                                    "chunk_count": item.get("chunk_count", len(audio_parts)),
+                                    "auto_split": item.get("auto_split", False),
+                                    "max_chars": item.get("max_chars"),
+                                    "headings_detected": item.get("headings_detected", False),
+                                    "headings_used": item.get("headings_used", False),
+                                    "chunk_strategy": item.get("chunk_strategy"),
+                                    "script_model": item.get("script_model"),
+                                }
+                            )
                         write_job_manifest(manifest["job_id"], manifest)
 
     if manifest:
@@ -677,20 +1058,20 @@ def podcast_download(category, filename):
     directories = {
         "scripts": PODCAST_SCRIPT_DIR,
         "audio": PODCAST_AUDIO_DIR,
-        "inputs": PODCAST_INPUT_DIR,
+        "uploads": PODCAST_UPLOAD_DIR,
     }
     if category not in directories:
         abort(404)
-    safe_name = secure_filename(filename)
-    if safe_name != filename:
+    file_path = Path(filename)
+    if file_path.is_absolute() or ".." in file_path.parts:
         abort(404)
     return send_from_directory(directories[category], filename, as_attachment=True)
 
 
 @yt_bp.route('/yt/podcast/media/<path:filename>')
 def podcast_media(filename):
-    safe_name = secure_filename(filename)
-    if safe_name != filename:
+    file_path = Path(filename)
+    if file_path.is_absolute() or ".." in file_path.parts:
         abort(404)
     return send_from_directory(PODCAST_AUDIO_DIR, filename, as_attachment=False)
 

@@ -22,6 +22,7 @@
   {% set selected_audio_prompt = manifest.selected_audio_prompt_name if manifest else '' %}
   {% set selected_tone = manifest.selected_tone if manifest else tone_options[0] %}
   {% set selected_voice = manifest.selected_voice if manifest else voice_options[0] %}
+  {% set selected_script_model = manifest.selected_script_model if manifest and manifest.selected_script_model else 'gpt-4o-mini' %}
 
   <p><strong>Step {{ current_step }} of 7</strong></p>
 
@@ -34,6 +35,12 @@
         <input type="checkbox" name="skip_script" {% if skip_script_checked %}checked{% endif %}>
         Skip script generation (use uploaded text as-is)
       </label><br><br>
+      <label>
+        <input type="checkbox" name="auto_split" checked>
+        Auto-split long text (recommended)
+      </label><br><br>
+      <label>Max chunk size (chars):</label><br>
+      <input type="number" name="max_chars" value="7000" min="3000" max="12000"><br><br>
       <button type="submit">Next: Choose Script Prompt</button>
     </form>
   {% endif %}
@@ -61,6 +68,13 @@
         {% endfor %}
       </select><br><br>
 
+      <label>Script model:</label><br>
+      <select name="script_model">
+        <option value="gpt-4o-mini" {% if selected_script_model == 'gpt-4o-mini' %}selected{% endif %}>gpt-4o-mini</option>
+        <option value="gpt-5-mini" {% if selected_script_model == 'gpt-5-mini' %}selected{% endif %}>gpt-5-mini</option>
+      </select>
+      <small>Note: gpt-5-mini ~1.67x input cost, ~3.33x output cost vs gpt-4o-mini.</small><br><br>
+
       <label>Save prompt as:</label><br>
       <input type="text" name="prompt_name" placeholder="Prompt name"><br><br>
 
@@ -79,8 +93,27 @@
       <ul>
         {% for item in manifest.script_files %}
           <li>
-            {{ item.original_name }} —
-            <a href="{{ url_for('yt.podcast_download', category='scripts', filename=item.script_filename) }}">Download Script</a>
+            <strong>{{ item.original_name }}</strong><br>
+            <a href="{{ url_for('yt.podcast_download', category='scripts', filename=item.script_full_filename) }}">Download Full Script</a>
+            {% if item.script_parts %}
+              <ul>
+                {% for part in item.script_parts %}
+                  <li>
+                    <a href="{{ url_for('yt.podcast_download', category='scripts', filename=part.script_filename) }}">Part {{ loop.index }}</a>
+                  </li>
+                {% endfor %}
+              </ul>
+            {% endif %}
+            <p>
+              Chunks: {{ item.chunk_count }} |
+              Auto-split: {{ 'Yes' if item.auto_split else 'No' }} |
+              Headings detected: {{ 'Yes' if item.headings_detected else 'No' }} |
+              Headings used: {{ 'Yes' if item.headings_used else 'No' }} |
+              Skip script: {{ 'Yes' if item.script_skipped else 'No' }}
+              {% if not item.script_skipped %}
+                | Script model: {{ item.script_model }}
+              {% endif %}
+            </p>
           </li>
         {% endfor %}
       </ul>
@@ -131,13 +164,34 @@
       {% for item in manifest.audio_files %}
         <div>
           <h3>{{ item.original_name }}</h3>
+          {% if item.audio_full_filename %}
+            <p>
+              <a href="{{ url_for('yt.podcast_download', category='audio', filename=item.audio_full_filename) }}">Download Full Audio</a>
+            </p>
+            <audio controls preload="none" style="width: 100%; max-width: 500px;">
+              <source src="{{ url_for('yt.podcast_media', filename=item.audio_full_filename) }}" type="audio/mpeg">
+              Your browser does not support the audio element.
+            </audio>
+          {% else %}
+            <p>Audio merge failed; download parts below:</p>
+            <ul>
+              {% for part in item.audio_parts %}
+                <li>
+                  <a href="{{ url_for('yt.podcast_download', category='audio', filename=part.audio_filename) }}">Part {{ loop.index }}</a>
+                </li>
+              {% endfor %}
+            </ul>
+          {% endif %}
           <p>
-            <a href="{{ url_for('yt.podcast_download', category='audio', filename=item.audio_filename) }}">Download Audio</a>
+            Chunks: {{ item.chunk_count }} |
+            Auto-split: {{ 'Yes' if item.auto_split else 'No' }} |
+            Headings detected: {{ 'Yes' if item.headings_detected else 'No' }} |
+            Headings used: {{ 'Yes' if item.headings_used else 'No' }} |
+            Skip script: {{ 'Yes' if item.script_skipped else 'No' }}
+            {% if not item.script_skipped %}
+              | Script model: {{ item.script_model }}
+            {% endif %}
           </p>
-          <audio controls preload="none" style="width: 100%; max-width: 500px;">
-            <source src="{{ url_for('yt.podcast_media', filename=item.audio_filename) }}" type="audio/mpeg">
-            Your browser does not support the audio element.
-          </audio>
         </div>
         <hr>
       {% endfor %}
