@@ -1,39 +1,53 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <title>Download History</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-</head>
-<body>
-  <hr>
-  <p>
-    <a href="/yt/clear_logs"><button>🧹 Clear Progress Logs</button></a>
-    <a href="/yt/clear_history"><button>🧻 Clear History</button></a>
-  </p>
-  <hr>
-  <h1>Download History</h1>
-  <ul>
-    {% for entry in history %}
-      <li>
-          <strong>{{ entry.timestamp }}</strong><br>
-          <em>{{ entry.title }}</em><br>
-          {{ entry.url }}<br>
-          Saved to: {{ entry.folder }}<br><br>
+{% extends "base.html" %}
 
-          <form method="POST" action="/yt">
+{% block title %}Download History · WatchUp{% endblock %}
+
+{% block content %}
+  <section class="page-hero">
+    <h1>Download History</h1>
+    <p class="page-subtitle">Review recent downloads and restart with one tap.</p>
+  </section>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flash-list">
+        {% for category, message in messages %}
+          <p class="flash flash-{{ category }}">{{ message }}</p>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <section class="card card--actions">
+    <a class="button button--ghost" href="{{ url_for('yt.clear_logs') }}">🧹 Clear Progress Logs</a>
+    <a class="button button--ghost" href="{{ url_for('yt.clear_history') }}">🧻 Clear History</a>
+  </section>
+
+  <section class="card">
+    <ul class="history-list">
+      {% for entry in history %}
+        <li class="history-item">
+          <div class="history-meta">
+            <strong>{{ entry.timestamp }}</strong>
+            <span class="history-title">{{ entry.title }}</span>
+            <span class="history-url">{{ entry.url }}</span>
+            <span class="history-folder">Saved to: {{ entry.folder }}</span>
+          </div>
+          <form method="POST" action="{{ url_for('yt.index') }}">
             <input type="hidden" name="url" value="{{ entry.url }}">
             <input type="hidden" name="quality" value="best">
             <input type="hidden" name="format" value="video">
             <input type="hidden" name="video_container" value="mp4">
             <input type="hidden" name="audio_container" value="mp3">
             <input type="hidden" name="folder" value="Videos">
-            <button type="submit">Download again</button>
+            <button class="button button--primary" type="submit">Download again</button>
           </form>
-      </li>
-    {% else %}
-      <li>No downloads yet.</li>
-    {% endfor %}
-  </ul>
-  <a href="/yt">← Back to Downloader</a>
-</body>
-</html>
+        </li>
+      {% else %}
+        <li class="history-item history-item--empty">No downloads yet.</li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <a class="text-link" href="{{ url_for('yt.index') }}">← Back to Downloader</a>
+{% endblock %}

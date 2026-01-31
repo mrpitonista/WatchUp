@@ -800,7 +800,12 @@ def index():
 
         return redirect(url_for('yt.index'))
 
-    return render_template('yt/index.html', folders=DOWNLOAD_FOLDERS)
+    return render_template('yt/index.html', folders=DOWNLOAD_FOLDERS, active_page="yt")
+
+
+@yt_bp.route('/yt/home')
+def home():
+    return render_template('yt/landing.html', active_page="home")
 
 @yt_bp.route('/yt/history')
 def history():
@@ -813,7 +818,7 @@ def history():
         print("❌ Failed to load history:", e)
         history = []
 
-    return render_template('yt/history.html', history=history)
+    return render_template('yt/history.html', history=history, active_page="history")
 
 @yt_bp.route('/yt/clear_logs')
 def clear_logs():
@@ -1220,6 +1225,7 @@ def podcast():
         skip_script_checked=skip_script_checked,
         job_status=job_status,
         smb_base_url=SMB_BASE_URL.rstrip("/"),
+        active_page="podcast",
     )
 
 
@@ -1278,22 +1284,25 @@ def podcast_media(filename):
     return send_from_directory(PODCAST_AUDIO_DIR, filename, as_attachment=False)
 
 # ------- Magnet link downloader -------
-@yt_bp.route('/yt/magnet', methods=['POST'])
+@yt_bp.route('/yt/magnet', methods=['GET', 'POST'])
 def magnet_download():
+    if request.method == 'GET':
+        return render_template('yt/magnet.html', folders=DOWNLOAD_FOLDERS, active_page="magnet")
+
     magnet = request.form.get('magnet', '').strip()
     folder_key = request.form.get('folder', '')
     folder_path = DOWNLOAD_FOLDERS.get(folder_key, '/tmp')
 
     if not magnet:
         flash('Magnet link required', 'danger')
-        return redirect(url_for('yt.index'))
+        return redirect(url_for('yt.magnet_download'))
 
     uid = str(uuid.uuid4())[:8]
 
     # Verify that aria2c is available before attempting the download
     if shutil.which('aria2c') is None:
         flash('aria2c is required for magnet downloads. Please install it first.', 'danger')
-        return redirect(url_for('yt.index'))
+        return redirect(url_for('yt.magnet_download'))
 
     cmd = ['aria2c', '--dir', folder_path, magnet]
 
@@ -1304,4 +1313,4 @@ def magnet_download():
     except Exception as e:
         flash(f"Magnet download error: {e}", 'danger')
 
-    return redirect(url_for('yt.index'))
+    return redirect(url_for('yt.magnet_download'))
