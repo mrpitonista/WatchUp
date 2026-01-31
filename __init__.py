@@ -752,7 +752,7 @@ def run_download_and_track(cmd, uid):
 def index():
     if request.method == 'POST':
         url = request.form['url'].strip()
-        quality = request.form['quality'].strip() or 'best'
+        quality = 'bv*+ba/b'
         fmt = request.form['format']
         folder_key = request.form['folder']
         folder_path = DOWNLOAD_FOLDERS.get(folder_key, '/tmp')
@@ -763,7 +763,15 @@ def index():
 
         uid = str(uuid.uuid4())[:8]
         output_template = os.path.join(folder_path, '%(title)s.%(ext)s')
-        cmd = ['yt-dlp', '-f', quality, '-o', output_template, url]
+        cmd = [
+            'yt-dlp',
+            '--cookies-from-browser', 'chrome',
+            '--extractor-args', 'youtube:player_client=android',
+            '-f', quality,
+            '-S', 'proto:https,res,ext:mp4:m4a',
+            '-o', output_template,
+            url
+        ]
 
         if fmt == 'audio':
             cmd += ['--extract-audio', '--audio-format', audio_container]
