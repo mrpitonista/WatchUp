@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}WatchUp Home{% endblock %}
+
+{% block content %}
+  <section class="page-hero">
+    <h1>Welcome to WatchUp</h1>
+    <p class="page-subtitle">Choose a workspace to get started.</p>
+  </section>
+
+  <section class="cards-grid">
+    <div class="card card--action">
+      <div class="card__icon">🎬</div>
+      <h2>YT Downloads</h2>
+      <p>Grab videos or audio with live progress tracking.</p>
+      <a class="button button--primary" href="{{ url_for('yt.index') }}">Open</a>
+    </div>
+    <div class="card card--action">
+      <div class="card__icon">🧲</div>
+      <h2>Magnet</h2>
+      <p>Download magnet links with a dedicated queue.</p>
+      <a class="button button--primary" href="{{ url_for('yt.magnet_download') }}">Open</a>
+    </div>
+    <div class="card card--action">
+      <div class="card__icon">🎙️</div>
+      <h2>Podcast Studio</h2>
+      <p>Turn text into structured podcast scripts and audio.</p>
+      <a class="button button--primary" href="{{ url_for('yt.podcast') }}">Open</a>
+    </div>
+  </section>
+{% endblock %}

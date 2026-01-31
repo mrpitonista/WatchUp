@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+
+{% block title %}Magnet Downloads · WatchUp{% endblock %}
+
+{% block content %}
+  <section class="page-hero">
+    <h1>Magnet Downloads</h1>
+    <p class="page-subtitle">Submit magnet links with clean, focused controls.</p>
+  </section>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flash-list">
+        {% for category, message in messages %}
+          <p class="flash flash-{{ category }}">{{ message }}</p>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <section class="card">
+    <form method="post" action="{{ url_for('yt.magnet_download') }}">
+      <label>Magnet URL:</label>
+      <input type="text" name="magnet" required>
+
+      <label>Save to folder:</label>
+      <select name="folder">
+        {% for name, path in folders.items() %}
+          <option value="{{ name }}">{{ name }}</option>
+        {% endfor %}
+      </select>
+
+      <button class="button button--primary" type="submit">Start Magnet Download</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Need video downloads instead?</h2>
+    <p>Switch back to the YouTube workspace.</p>
+    <a class="button button--ghost" href="{{ url_for('yt.index') }}">Go to YT Downloads</a>
+  </section>
+{% endblock %}

@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{% block title %}WatchUp{% endblock %}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="{{ url_for('yt.static', filename='style.css') }}">
+</head>
+<body>
+  <header class="app-header">
+    <div class="app-header__inner">
+      <div class="app-brand">
+        <span class="app-brand__title">WatchUp</span>
+      </div>
+      <a class="app-header__home" href="{{ url_for('yt.home') }}">Home</a>
+    </div>
+  </header>
+
+  <main class="page-container">
+    {% block content %}{% endblock %}
+  </main>
+
+  <nav class="bottom-nav" aria-label="Primary">
+    <a class="bottom-nav__link {% if active_page == 'yt' %}is-active{% endif %}" href="{{ url_for('yt.index') }}">YT</a>
+    <a class="bottom-nav__link {% if active_page == 'magnet' %}is-active{% endif %}" href="{{ url_for('yt.magnet_download') }}">Magnet</a>
+    <a class="bottom-nav__link {% if active_page == 'podcast' %}is-active{% endif %}" href="{{ url_for('yt.podcast') }}">Podcast</a>
+    <a class="bottom-nav__link {% if active_page == 'history' %}is-active{% endif %}" href="{{ url_for('yt.history') }}">History</a>
+  </nav>
+</body>
+</html>

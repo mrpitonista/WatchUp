@@ -1,101 +1,124 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <title>YT-DLP Web Downloader</title>
-  <link rel="stylesheet" href="{{ url_for('yt.static', filename='style.css') }}">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-</head>
-<body>
-  <h1>YT-DLP Web Downloader</h1>
+{% extends "base.html" %}
+
+{% block title %}YT Downloads · WatchUp{% endblock %}
+
+{% block content %}
+  <section class="page-hero">
+    <h1>YT Downloads</h1>
+    <p class="page-subtitle">Download videos or audio with clean, simple controls.</p>
+  </section>
 
   {% with messages = get_flashed_messages(with_categories=true) %}
-    {% for category, message in messages %}
-      <p class="flash-{{ category }}">{{ message }}</p>
-    {% endfor %}
+    {% if messages %}
+      <div class="flash-list">
+        {% for category, message in messages %}
+          <p class="flash flash-{{ category }}">{{ message }}</p>
+        {% endfor %}
+      </div>
+    {% endif %}
   {% endwith %}
 
-  <form method="post">
-    <label>YouTube/Stream URL:</label><br>
-    <input type="text" name="url" required><br><br>
+  <section class="card">
+    <form method="post">
+      <label>YouTube/Stream URL:</label>
+      <input type="text" name="url" required>
 
-    <label>Quality:</label><br>
-    <select name="quality">
-      <option value="best">Best (automatic)</option>
-      <option value="bestvideo[height<=1080]+bestaudio">1080p</option>
-      <option value="bestvideo[height<=720]+bestaudio">720p</option>
-      <option value="bestvideo[height<=480]+bestaudio">480p</option>
-      <option value="bestvideo[height<=360]+bestaudio">360p</option>
-      <option value="worst">Worst (smallest)</option>
-    </select><br><br>
+      <label>Quality:</label>
+      <select name="quality">
+        <option value="best">Best (automatic)</option>
+        <option value="bestvideo[height<=1080]+bestaudio">1080p</option>
+        <option value="bestvideo[height<=720]+bestaudio">720p</option>
+        <option value="bestvideo[height<=480]+bestaudio">480p</option>
+        <option value="bestvideo[height<=360]+bestaudio">360p</option>
+        <option value="worst">Worst (smallest)</option>
+      </select>
 
-    <label>Format:</label><br>
-    <select name="format">
-      <option value="video">Video</option>
-      <option value="audio">Audio</option>
-    </select><br><br>
+      <label>Format:</label>
+      <select name="format">
+        <option value="video">Video</option>
+        <option value="audio">Audio</option>
+      </select>
 
-    <label>Audio container:</label><br>
-    <input type="text" name="audio_container" value="mp3"><br><br>
+      <label>Audio container:</label>
+      <input type="text" name="audio_container" value="mp3">
 
-    <label>Video container:</label><br>
-    <input type="text" name="video_container" value="mp4"><br><br>
+      <label>Video container:</label>
+      <input type="text" name="video_container" value="mp4">
 
-    <label>Subtitles:</label>
-    <input type="checkbox" name="subtitles"><br><br>
+      <label class="checkbox-row">
+        <input type="checkbox" name="subtitles">
+        Subtitles
+      </label>
 
-    <label>Clip section (e.g., 00:10:00-00:15:00):</label><br>
-    <input type="text" name="section"><br><br>
+      <label>Clip section (e.g., 00:10:00-00:15:00):</label>
+      <input type="text" name="section">
 
-    <label>Save to folder:</label><br>
-    <select name="folder">
-      {% for name, path in folders.items() %}
-        <option value="{{ name }}">{{ name }}</option>
-      {% endfor %}
-    </select><br><br>
+      <label>Save to folder:</label>
+      <select name="folder">
+        {% for name, path in folders.items() %}
+          <option value="{{ name }}">{{ name }}</option>
+        {% endfor %}
+      </select>
 
-    <button type="submit">Start Download</button>
-  </form>
+      <button class="button button--primary" type="submit">Start Download</button>
+    </form>
+  </section>
 
-  <hr>
-  <p>
-    <a href="/yt/history">📜 View Download History</a>
-    |
-    <a href="/yt/podcast">🎙️ Text → Podcast</a>
-  </p>
+  <section class="cards-grid cards-grid--tight">
+    <div class="card card--action">
+      <h2>History</h2>
+      <p>Review past downloads and restart jobs quickly.</p>
+      <a class="button button--ghost" href="{{ url_for('yt.history') }}">View History</a>
+    </div>
+    <div class="card card--action">
+      <h2>Podcast Studio</h2>
+      <p>Generate scripts and audio from uploaded text.</p>
+      <a class="button button--ghost" href="{{ url_for('yt.podcast') }}">Open Podcast Studio</a>
+    </div>
+    <div class="card card--action">
+      <h2>Magnet Downloads</h2>
+      <p>Switch to the magnet workspace for torrent links.</p>
+      <a class="button button--ghost" href="{{ url_for('yt.magnet_download') }}">Go to Magnet</a>
+    </div>
+  </section>
 
-  <!-- ✅ Progress Display -->
-  <h2>Live Download Progress</h2>
-  <p>To view progress, enter a job ID (video or magnet):</p>
-  <input type="text" id="progress-uid" placeholder="Enter download ID">
-  <button onclick="startTracking()">Track</button>
+  <section class="card">
+    <h2>Live Download Progress</h2>
+    <p>To view progress, enter a job ID (video or magnet):</p>
+    <div class="inline-field">
+      <input type="text" id="progress-uid" placeholder="Enter download ID">
+      <button class="button button--primary" type="button" onclick="startTracking()">Track</button>
+    </div>
 
-  <pre id="progress-log">
+    <pre id="progress-log">
 Progress will appear here...
-  </pre>
+    </pre>
+  </section>
+
   <script>
     let intervalId = null;
-  
+
     function startTracking() {
       const uid = document.getElementById("progress-uid").value.trim();
       const logBox = document.getElementById("progress-log");
-  
+
       if (!uid) {
         alert("Please enter a valid download ID.");
         return;
       }
-  
+
       logBox.innerText = "Starting to track download: " + uid;
-  
+
       if (intervalId) {
         clearInterval(intervalId);
       }
-  
+
       intervalId = setInterval(() => {
         fetch(`/yt/progress/${uid}`)
           .then(res => res.text())
           .then(text => {
             logBox.innerText = text;
-  
+
             // ✅ Auto-stop when download hits 100%
             if (text.includes("100%") && text.includes("at") && text.includes("in")) {
               clearInterval(intervalId);
@@ -109,21 +132,4 @@ Progress will appear here...
       }, 2000);
     }
   </script>
-
-  <hr>
-  <h2>Magnet Link Downloader</h2>
-  <form method="post" action="/yt/magnet">
-    <label>Magnet URL:</label><br>
-    <input type="text" name="magnet" required><br><br>
-
-    <label>Save to folder:</label><br>
-    <select name="folder">
-      {% for name, path in folders.items() %}
-        <option value="{{ name }}">{{ name }}</option>
-      {% endfor %}
-    </select><br><br>
-
-    <button type="submit">Start Magnet Download</button>
-  </form>
-</body>
-</html>
+{% endblock %}
