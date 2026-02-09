@@ -16,6 +16,15 @@ import uuid
 from dotenv import load_dotenv
 from openai import OpenAI
 from werkzeug.utils import secure_filename
+from clipper_utils import (
+    build_blocks,
+    blocks_to_prompt_text,
+    find_matching_video,
+    ms_to_timestamp,
+    parse_srt,
+    parse_vtt,
+    safe_list_media_files,
+)
 
 this_dir = Path(__file__).resolve().parent
 history_path = this_dir / "download_history.json"
@@ -33,12 +42,25 @@ SMB_BASE_URL = os.getenv(
     "smb://MacMiniMedia._smb._tcp.local/Admin/YT_Dashboard/podcast_files",
 )
 
+MEDIA_OTHER_DIR = this_dir.parent / "Media" / "Other"
+MEDIA_CLIPS_DIR = this_dir.parent / "Media" / "Clips"
+CLIPPER_ROOT = this_dir / "clipper_files"
+CLIPPER_SUMMARY_DIR = CLIPPER_ROOT / "summaries"
+CLIPPER_BLOCKS_DIR = CLIPPER_ROOT / "blocks"
+CLIPPER_JOBS_DIR = CLIPPER_ROOT / "jobs"
+
 PODCAST_ROOT.mkdir(exist_ok=True)
 PODCAST_UPLOAD_DIR.mkdir(exist_ok=True)
 PODCAST_SCRIPT_DIR.mkdir(exist_ok=True)
 PODCAST_AUDIO_DIR.mkdir(exist_ok=True)
 PODCAST_JOBS_DIR.mkdir(exist_ok=True)
 PODCAST_OUTPUT_DIR.mkdir(exist_ok=True)
+
+CLIPPER_ROOT.mkdir(exist_ok=True)
+CLIPPER_SUMMARY_DIR.mkdir(exist_ok=True)
+CLIPPER_BLOCKS_DIR.mkdir(exist_ok=True)
+CLIPPER_JOBS_DIR.mkdir(exist_ok=True)
+MEDIA_CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 
 ENV_FILE = "openai_api_key.env"
 SCRIPT_MODEL = "gpt-4o-mini"
@@ -50,6 +72,51 @@ MAX_PODCAST_FILES = 5
 SCRIPT_JOB_EXECUTOR = ThreadPoolExecutor(max_workers=2)
 SCRIPT_CHUNK_TIMEOUT = 90
 SCRIPT_MAX_RETRIES = 1
+
+CLIPPER_SYSTEM_PROMPT = (
+    "You are a precise video timeline analyst. You will be given subtitle blocks in the form:\n"
+    "[start–end] text...\n"
+    "Your job is to extract the most important moments and return a strict JSON object that can "
+    "drive automated video clipping. Do not invent timestamps. Use only timestamps that fall "
+    "within the provided blocks. Keep segments non-overlapping and in chronological order."
+)
+
+CLIPPER_USER_PROMPT_TEMPLATE = (
+    "TASK\n"
+    "From the subtitle blocks below, produce a timestamped summary suitable for automated clip generation.\n\n"
+    "OUTPUT FORMAT (STRICT JSON ONLY)\n"
+    "Return exactly one JSON object with this schema:\n\n"
+    "{\n"
+    "  \"title\": string,\n"
+    "  \"language\": string,\n"
+    "  \"segments\": [\n"
+    "    {\n"
+    "      \"start\": \"HH:MM:SS.mmm\",\n"
+    "      \"end\": \"HH:MM:SS.mmm\",\n"
+    "      \"headline\": string,\n"
+    "      \"summary\": string,\n"
+    "      \"why_it_matters\": string,\n"
+    "      \"keywords\": [string, ...]\n"
+    "    }\n"
+    "  ]\n"
+    "}\n\n"
+    "RULES (NON-NEGOTIABLE)\n"
+    "1) Choose 8–12 segments total.\n"
+    "2) Segments must be chronological and must NOT overlap (end <= next start).\n"
+    "3) Each segment must be between 20 seconds and 3 minutes.\n"
+    "4) Start and end times must be within the provided timeline. Do NOT use timestamps outside it.\n"
+    "5) Prefer boundaries that align with block boundaries you see.\n"
+    "6) Avoid duplication: each segment must cover a different idea/event.\n"
+    "7) Strict JSON only: no markdown, no commentary.\n\n"
+    "QUALITY GOAL\n"
+    "Select moments that capture:\n"
+    "- the core argument / story arc\n"
+    "- key claims or decisions\n"
+    "- notable examples/demos\n"
+    "- conclusions / takeaways\n\n"
+    "SUBTITLE BLOCKS (SOURCE OF TRUTH)\n"
+    "{blocks_text}"
+)
 
 yt_bp = Blueprint(
     'yt',
@@ -143,6 +210,54 @@ def get_openai_client(max_retries: int | None = None) -> OpenAI:
     if max_retries is None:
         return OpenAI(api_key=api_key)
     return OpenAI(api_key=api_key, max_retries=max_retries)
+
+
+def clipper_job_path(job_id: str) -> Path:
+    return CLIPPER_JOBS_DIR / f"{job_id}.json"
+
+
+def load_clipper_job(job_id: str) -> dict | None:
+    path = clipper_job_path(job_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
+def write_clipper_job(job_id: str, payload: dict) -> None:
+    clipper_job_path(job_id).write_text(json.dumps(payload, indent=2))
+
+
+def resolve_media_other_file(filename: str) -> Path | None:
+    if not filename or Path(filename).name != filename:
+        return None
+    candidate = (MEDIA_OTHER_DIR / filename).resolve()
+    try:
+        candidate.relative_to(MEDIA_OTHER_DIR.resolve())
+    except ValueError:
+        return None
+    if not candidate.exists():
+        return None
+    return candidate
+
+
+def resolve_clips_file(filename: str) -> Path | None:
+    if not filename or Path(filename).name != filename:
+        return None
+    candidate = (MEDIA_CLIPS_DIR / filename).resolve()
+    try:
+        candidate.relative_to(MEDIA_CLIPS_DIR.resolve())
+    except ValueError:
+        return None
+    if not candidate.exists():
+        return None
+    return candidate
+
+
+def format_clip_timestamp(value: str) -> str:
+    return value.replace(":", "-").replace(".", "_")
 
 
 def job_status_path(job_id: str) -> Path:
@@ -806,6 +921,269 @@ def index():
 @yt_bp.route('/yt/home')
 def home():
     return render_template('yt/landing.html', active_page="home")
+
+
+@yt_bp.route('/yt/clipper', methods=['GET'])
+def clipper():
+    subtitle_files = safe_list_media_files(MEDIA_OTHER_DIR, [".srt", ".vtt"])
+    video_files = safe_list_media_files(MEDIA_OTHER_DIR, [".mp4", ".mkv", ".webm", ".mov"])
+    return render_template(
+        'yt/clipper.html',
+        active_page="clipper",
+        subtitle_files=subtitle_files,
+        video_files=video_files,
+    )
+
+
+@yt_bp.route('/yt/clipper/analyze', methods=['POST'])
+def clipper_analyze():
+    subtitle_filename = (request.form.get("subtitle_file") or "").strip()
+    video_filename = (request.form.get("video_file") or "").strip()
+    subtitle_path = resolve_media_other_file(subtitle_filename)
+    if not subtitle_path:
+        flash("Please select a valid subtitle file from Admin/Media/Other.", "danger")
+        return redirect(url_for('yt.clipper'))
+
+    if subtitle_path.suffix.lower() == ".srt":
+        cues = parse_srt(subtitle_path)
+    elif subtitle_path.suffix.lower() == ".vtt":
+        cues = parse_vtt(subtitle_path)
+    else:
+        flash("Unsupported subtitle format. Use .srt or .vtt.", "danger")
+        return redirect(url_for('yt.clipper'))
+
+    if not cues:
+        flash("No subtitle cues were found in the selected file.", "danger")
+        return redirect(url_for('yt.clipper'))
+
+    if video_filename:
+        video_path = resolve_media_other_file(video_filename)
+        if not video_path:
+            flash("Selected video file is not available in Admin/Media/Other.", "danger")
+            return redirect(url_for('yt.clipper'))
+    else:
+        match = find_matching_video(subtitle_path)
+        video_path = resolve_media_other_file(match) if match else None
+
+    if not video_path:
+        flash("No matching video file found. Please select a video manually.", "danger")
+        return redirect(url_for('yt.clipper'))
+
+    job_id = uuid.uuid4().hex[:12]
+    blocks = build_blocks(cues, target_seconds=45, max_chars=1400)
+    if not blocks:
+        flash("Failed to build subtitle blocks for analysis.", "danger")
+        return redirect(url_for('yt.clipper'))
+
+    job_blocks_dir = CLIPPER_BLOCKS_DIR / job_id
+    job_summary_dir = CLIPPER_SUMMARY_DIR / job_id
+    job_blocks_dir.mkdir(parents=True, exist_ok=True)
+    job_summary_dir.mkdir(parents=True, exist_ok=True)
+
+    blocks_preview = blocks_to_prompt_text(blocks)
+    blocks_preview_path = job_blocks_dir / f"{subtitle_path.stem}_blocks_preview.txt"
+    blocks_json_path = job_blocks_dir / f"{subtitle_path.stem}_blocks.json"
+
+    blocks_preview_path.write_text(blocks_preview)
+    blocks_payload = [
+        {
+            "start": ms_to_timestamp(block["start_ms"]),
+            "end": ms_to_timestamp(block["end_ms"]),
+            "text": block["text"],
+            "start_ms": block["start_ms"],
+            "end_ms": block["end_ms"],
+        }
+        for block in blocks
+    ]
+    blocks_json_path.write_text(json.dumps(blocks_payload, indent=2))
+
+    logger.info(
+        "[CLIPPER] job_id=%s subtitle=%s video=%s blocks=%s",
+        job_id,
+        subtitle_path.name,
+        video_path.name,
+        len(blocks),
+    )
+
+    prompt_text = CLIPPER_USER_PROMPT_TEMPLATE.format(blocks_text=blocks_preview)
+    logger.info("[CLIPPER] openai request chars=%s", len(prompt_text))
+    client = get_openai_client()
+    summary_data: dict
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": CLIPPER_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt_text},
+            ],
+        )
+        raw_summary = response.choices[0].message.content or ""
+    except Exception as exc:
+        logger.exception("[CLIPPER] openai request failed")
+        flash(f"OpenAI request failed: {exc}", "danger")
+        return redirect(url_for('yt.clipper'))
+
+    try:
+        summary_data = json.loads(raw_summary)
+    except json.JSONDecodeError:
+        summary_data = {"error": "Invalid JSON from OpenAI", "raw": raw_summary, "segments": []}
+        flash("OpenAI returned invalid JSON. Check the summary output for details.", "danger")
+
+    summary_path = job_summary_dir / f"{subtitle_path.stem}_summary.json"
+    summary_pretty_path = job_summary_dir / f"{subtitle_path.stem}_summary_pretty.json"
+    summary_path.write_text(json.dumps(summary_data))
+    summary_pretty_path.write_text(json.dumps(summary_data, indent=2))
+
+    manifest = {
+        "job_id": job_id,
+        "created_at": datetime.now().isoformat(),
+        "subtitle_file": subtitle_path.name,
+        "video_file": video_path.name,
+        "summary_path": str(summary_path),
+        "clips": [],
+    }
+    write_clipper_job(job_id, manifest)
+
+    return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+
+@yt_bp.route('/yt/clipper/job/<job_id>')
+def clipper_job(job_id):
+    manifest = load_clipper_job(job_id)
+    if not manifest:
+        flash("Clipper job not found.", "danger")
+        return redirect(url_for('yt.clipper'))
+
+    summary_path = Path(manifest.get("summary_path", ""))
+    if not summary_path.exists():
+        flash("Clipper summary not found.", "danger")
+        return redirect(url_for('yt.clipper'))
+
+    try:
+        summary_data = json.loads(summary_path.read_text())
+    except json.JSONDecodeError:
+        summary_data = {"segments": [], "error": "Summary JSON is invalid."}
+
+    segments = summary_data.get("segments", [])
+    clips_by_segment: dict[int, list[dict]] = {}
+    for clip in manifest.get("clips", []):
+        seg_index = clip.get("segment_index")
+        if isinstance(seg_index, int):
+            clips_by_segment.setdefault(seg_index, []).append(clip)
+    return render_template(
+        'yt/clipper_job.html',
+        active_page="clipper",
+        manifest=manifest,
+        summary=summary_data,
+        segments=segments,
+        clips_by_segment=clips_by_segment,
+    )
+
+
+@yt_bp.route('/yt/clipper/job/<job_id>/clip', methods=['POST'])
+def clipper_clip(job_id):
+    manifest = load_clipper_job(job_id)
+    if not manifest:
+        flash("Clipper job not found.", "danger")
+        return redirect(url_for('yt.clipper'))
+
+    summary_path = Path(manifest.get("summary_path", ""))
+    if not summary_path.exists():
+        flash("Clipper summary not found.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    try:
+        summary_data = json.loads(summary_path.read_text())
+    except json.JSONDecodeError:
+        flash("Summary JSON is invalid.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    segments = summary_data.get("segments", [])
+    segment_index_raw = (request.form.get("segment_index") or "").strip()
+    if not segment_index_raw.isdigit():
+        flash("Invalid segment selection.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+    segment_index = int(segment_index_raw)
+    if segment_index < 0 or segment_index >= len(segments):
+        flash("Segment not found.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    segment = segments[segment_index]
+    start = segment.get("start")
+    end = segment.get("end")
+    if not start or not end:
+        flash("Segment timestamps are missing.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    video_path = resolve_media_other_file(manifest.get("video_file", ""))
+    if not video_path:
+        flash("Source video not found in Admin/Media/Other.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    output_filename = (
+        f"{video_path.stem}__{format_clip_timestamp(start)}__"
+        f"{format_clip_timestamp(end)}__seg_{segment_index + 1:02d}.mp4"
+    )
+    output_path = MEDIA_CLIPS_DIR / output_filename
+
+    logger.info(
+        "[CLIPPER] clip seg=%s start=%s end=%s -> output=%s",
+        segment_index + 1,
+        start,
+        end,
+        output_path,
+    )
+
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                start,
+                "-to",
+                end,
+                "-i",
+                str(video_path),
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+                str(output_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        flash("ffmpeg is not installed on the server.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    if result.returncode != 0:
+        logger.error("[CLIPPER] ffmpeg error: %s", result.stderr)
+        flash(f"Clip generation failed: {result.stderr}", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    clip_entry = {
+        "segment_index": segment_index,
+        "start": start,
+        "end": end,
+        "clip_filename": output_filename,
+        "clip_path": str(output_path),
+        "created_at": datetime.now().isoformat(),
+    }
+    manifest.setdefault("clips", []).append(clip_entry)
+    write_clipper_job(job_id, manifest)
+    flash("Clip created successfully.", "success")
+    return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+
+@yt_bp.route('/yt/clipper/download/<path:filename>')
+def clipper_download(filename):
+    resolved = resolve_clips_file(filename)
+    if not resolved:
+        abort(404)
+    return send_from_directory(MEDIA_CLIPS_DIR, resolved.name, as_attachment=True)
 
 @yt_bp.route('/yt/history')
 def history():

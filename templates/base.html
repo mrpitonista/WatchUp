@@ -24,6 +24,7 @@
     <a class="bottom-nav__link {% if active_page == 'yt' %}is-active{% endif %}" href="{{ url_for('yt.index') }}">YT</a>
     <a class="bottom-nav__link {% if active_page == 'magnet' %}is-active{% endif %}" href="{{ url_for('yt.magnet_download') }}">Magnet</a>
     <a class="bottom-nav__link {% if active_page == 'podcast' %}is-active{% endif %}" href="{{ url_for('yt.podcast') }}">Podcast</a>
+    <a class="bottom-nav__link {% if active_page == 'clipper' %}is-active{% endif %}" href="{{ url_for('yt.clipper') }}">Clipper</a>
     <a class="bottom-nav__link {% if active_page == 'history' %}is-active{% endif %}" href="{{ url_for('yt.history') }}">History</a>
   </nav>
 </body>
