@@ -26,7 +26,8 @@
       Job ID: {{ manifest.job_id }}<br>
       Subtitle: {{ manifest.subtitle_file }}<br>
       Video: {{ manifest.video_file }}<br>
-      Language: {{ summary.language or 'Unknown' }}
+      Language: {{ summary.language or 'Unknown' }}<br>
+      Model used: {{ manifest.summary_model or 'gpt-4o-mini' }}
     </p>
     {% if summary.error %}
       <p class="flash flash-danger">{{ summary.error }}</p>
@@ -34,36 +35,61 @@
   </section>
 
   {% if segments %}
-    <section class="cards-grid">
-      {% for segment in segments %}
-        <div class="card">
-          <h3>{{ segment.headline or 'Segment ' ~ loop.index }}</h3>
-          <p><strong>{{ segment.start }} → {{ segment.end }}</strong></p>
-          <p>{{ segment.summary }}</p>
-          {% if segment.why_it_matters %}
-            <p class="meta-text">Why it matters: {{ segment.why_it_matters }}</p>
-          {% endif %}
-          {% if segment.keywords %}
-            <p class="meta-text">Keywords: {{ segment.keywords | join(', ') }}</p>
-          {% endif %}
-          <form method="post" action="{{ url_for('yt.clipper_clip', job_id=manifest.job_id) }}">
-            <input type="hidden" name="segment_index" value="{{ loop.index0 }}">
-            <button class="button button--primary" type="submit">Create clip</button>
-          </form>
-          {% if clips_by_segment.get(loop.index0) %}
-            <div class="link-row">
-              <p class="meta-text">Generated clips:</p>
-              <ul class="list-stack">
-                {% for clip in clips_by_segment[loop.index0] %}
-                  <li>
-                    <a href="{{ url_for('yt.clipper_download', filename=clip.clip_filename) }}">Download {{ clip.clip_filename }}</a>
-                  </li>
-                {% endfor %}
-              </ul>
-            </div>
-          {% endif %}
-        </div>
-      {% endfor %}
+    <section class="card">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Start</th>
+              <th>End</th>
+              <th>Dur</th>
+              <th>Headline</th>
+              <th>Summary</th>
+              <th>Keywords</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for segment in segments %}
+              <tr>
+                <td class="mono">{{ segment.start }}</td>
+                <td class="mono">{{ segment.end }}</td>
+                <td class="mono">{{ segment.duration_label or '' }}</td>
+                <td>{{ segment.headline or 'Segment ' ~ loop.index }}</td>
+                <td>
+                  <div>{{ segment.summary }}</div>
+                  {% if segment.why_it_matters %}
+                    <div class="meta-text">Why it matters: {{ segment.why_it_matters }}</div>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if segment.keywords %}
+                    {{ segment.keywords | join(', ') }}
+                  {% endif %}
+                </td>
+                <td>
+                  <form method="post" action="{{ url_for('yt.clipper_clip', job_id=manifest.job_id) }}">
+                    <input type="hidden" name="segment_index" value="{{ loop.index0 }}">
+                    <button class="button button--primary" type="submit">Create clip</button>
+                  </form>
+                  {% if clips_by_segment.get(loop.index0) %}
+                    <div class="link-row">
+                      <p class="meta-text">Generated clips:</p>
+                      <ul class="list-stack">
+                        {% for clip in clips_by_segment[loop.index0] %}
+                          <li>
+                            <a href="{{ url_for('yt.clipper_download', filename=clip.clip_filename) }}">Download {{ clip.clip_filename }}</a>
+                          </li>
+                        {% endfor %}
+                      </ul>
+                    </div>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
     </section>
   {% else %}
     <section class="card">

@@ -21,6 +21,7 @@ from clipper_utils import (
     blocks_to_prompt_text,
     find_matching_video,
     ms_to_timestamp,
+    parse_timestamp_to_ms,
     parse_srt,
     parse_vtt,
     safe_list_media_files,
@@ -107,7 +108,8 @@ CLIPPER_USER_PROMPT_TEMPLATE = (
     "4) Start and end times must be within the provided timeline. Do NOT use timestamps outside it.\n"
     "5) Prefer boundaries that align with block boundaries you see.\n"
     "6) Avoid duplication: each segment must cover a different idea/event.\n"
-    "7) Strict JSON only: no markdown, no commentary.\n\n"
+    "7) Strict JSON only: no markdown, no commentary.\n"
+    "8) Use the exact key \"why_it_matters\" (underscore). Do NOT use dots or other variants.\n\n"
     "QUALITY GOAL\n"
     "Select moments that capture:\n"
     "- the core argument / story arc\n"
@@ -258,6 +260,15 @@ def resolve_clips_file(filename: str) -> Path | None:
 
 def format_clip_timestamp(value: str) -> str:
     return value.replace(":", "-").replace(".", "_")
+
+
+def format_duration_seconds(seconds: float) -> str:
+    total_seconds = int(round(seconds))
+    minutes, secs = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:d}:{secs:02d}"
 
 
 def job_status_path(job_id: str) -> Path:
@@ -939,6 +950,10 @@ def clipper():
 def clipper_analyze():
     subtitle_filename = (request.form.get("subtitle_file") or "").strip()
     video_filename = (request.form.get("video_file") or "").strip()
+    summary_model = (request.form.get("summary_model") or "gpt-4o-mini").strip()
+    allowed_summary_models = {"gpt-4o-mini", "gpt-5-mini"}
+    if summary_model not in allowed_summary_models:
+        summary_model = "gpt-4o-mini"
     subtitle_path = resolve_media_other_file(subtitle_filename)
     if not subtitle_path:
         flash("Please select a valid subtitle file from Admin/Media/Other.", "danger")
@@ -1011,7 +1026,7 @@ def clipper_analyze():
     summary_data: dict
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=summary_model,
             messages=[
                 {"role": "system", "content": CLIPPER_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt_text},
@@ -1025,9 +1040,25 @@ def clipper_analyze():
 
     try:
         summary_data = json.loads(raw_summary)
-    except json.JSONDecodeError:
+        if not isinstance(summary_data, dict):
+            raise ValueError("Summary JSON is not an object.")
+    except (json.JSONDecodeError, ValueError):
         summary_data = {"error": "Invalid JSON from OpenAI", "raw": raw_summary, "segments": []}
         flash("OpenAI returned invalid JSON. Check the summary output for details.", "danger")
+    else:
+        segments = summary_data.get("segments", [])
+        if not isinstance(segments, list):
+            segments = []
+        normalized_segments = []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            if "why_it.matters" in segment:
+                segment["why_it_matters"] = segment.pop("why_it.matters")
+            if segment.get("why_it_matters") is None or "why_it_matters" not in segment:
+                segment["why_it_matters"] = ""
+            normalized_segments.append(segment)
+        summary_data["segments"] = normalized_segments
 
     summary_path = job_summary_dir / f"{subtitle_path.stem}_summary.json"
     summary_pretty_path = job_summary_dir / f"{subtitle_path.stem}_summary_pretty.json"
@@ -1040,6 +1071,7 @@ def clipper_analyze():
         "subtitle_file": subtitle_path.name,
         "video_file": video_path.name,
         "summary_path": str(summary_path),
+        "summary_model": summary_model,
         "clips": [],
     }
     write_clipper_job(job_id, manifest)
@@ -1065,6 +1097,19 @@ def clipper_job(job_id):
         summary_data = {"segments": [], "error": "Summary JSON is invalid."}
 
     segments = summary_data.get("segments", [])
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        start = segment.get("start")
+        end = segment.get("end")
+        if not start or not end:
+            continue
+        try:
+            duration_seconds = max(0, (parse_timestamp_to_ms(end) - parse_timestamp_to_ms(start)) / 1000)
+        except ValueError:
+            continue
+        segment["duration_seconds"] = duration_seconds
+        segment["duration_label"] = format_duration_seconds(duration_seconds)
     clips_by_segment: dict[int, list[dict]] = {}
     for clip in manifest.get("clips", []):
         seg_index = clip.get("segment_index")
