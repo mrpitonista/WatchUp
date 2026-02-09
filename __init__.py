@@ -1005,7 +1005,7 @@ def clipper_analyze():
         len(blocks),
     )
 
-    prompt_text = CLIPPER_USER_PROMPT_TEMPLATE.format(blocks_text=blocks_preview)
+    prompt_text = CLIPPER_USER_PROMPT_TEMPLATE.replace("{blocks_text}", blocks_preview)
     logger.info("[CLIPPER] openai request chars=%s", len(prompt_text))
     client = get_openai_client()
     summary_data: dict
