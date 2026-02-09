@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block title %}Clipper Job · WatchUp{% endblock %}
+
+{% block content %}
+  <section class="page-hero">
+    <h1>Clipper Job</h1>
+    <p class="page-subtitle">Review the timestamped summary and generate clips.</p>
+  </section>
+
+  <a class="text-link" href="{{ url_for('yt.clipper') }}">⬅ Back to Clipper</a>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flash-list">
+        {% for category, message in messages %}
+          <p class="flash flash-{{ category }}">{{ message }}</p>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <section class="card">
+    <h2>{{ summary.title or 'Summary' }}</h2>
+    <p class="meta-text">
+      Job ID: {{ manifest.job_id }}<br>
+      Subtitle: {{ manifest.subtitle_file }}<br>
+      Video: {{ manifest.video_file }}<br>
+      Language: {{ summary.language or 'Unknown' }}
+    </p>
+    {% if summary.error %}
+      <p class="flash flash-danger">{{ summary.error }}</p>
+    {% endif %}
+  </section>
+
+  {% if segments %}
+    <section class="cards-grid">
+      {% for segment in segments %}
+        <div class="card">
+          <h3>{{ segment.headline or 'Segment ' ~ loop.index }}</h3>
+          <p><strong>{{ segment.start }} → {{ segment.end }}</strong></p>
+          <p>{{ segment.summary }}</p>
+          {% if segment.why_it_matters %}
+            <p class="meta-text">Why it matters: {{ segment.why_it_matters }}</p>
+          {% endif %}
+          {% if segment.keywords %}
+            <p class="meta-text">Keywords: {{ segment.keywords | join(', ') }}</p>
+          {% endif %}
+          <form method="post" action="{{ url_for('yt.clipper_clip', job_id=manifest.job_id) }}">
+            <input type="hidden" name="segment_index" value="{{ loop.index0 }}">
+            <button class="button button--primary" type="submit">Create clip</button>
+          </form>
+          {% if clips_by_segment.get(loop.index0) %}
+            <div class="link-row">
+              <p class="meta-text">Generated clips:</p>
+              <ul class="list-stack">
+                {% for clip in clips_by_segment[loop.index0] %}
+                  <li>
+                    <a href="{{ url_for('yt.clipper_download', filename=clip.clip_filename) }}">Download {{ clip.clip_filename }}</a>
+                  </li>
+                {% endfor %}
+              </ul>
+            </div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </section>
+  {% else %}
+    <section class="card">
+      <p class="meta-text">No segments available for this job.</p>
+    </section>
+  {% endif %}
+{% endblock %}

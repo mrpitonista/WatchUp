@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}Clipper · WatchUp{% endblock %}
+
+{% block content %}
+  <section class="page-hero">
+    <h1>Clipper</h1>
+    <p class="page-subtitle">Summarize subtitles and cut clips from your existing videos.</p>
+  </section>
+
+  <a class="text-link" href="{{ url_for('yt.home') }}">⬅ Back to Home</a>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flash-list">
+        {% for category, message in messages %}
+          <p class="flash flash-{{ category }}">{{ message }}</p>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <section class="card">
+    <h2>Select subtitles</h2>
+    {% if subtitle_files %}
+      <form method="post" action="{{ url_for('yt.clipper_analyze') }}">
+        <label>Subtitle file (.srt or .vtt):</label>
+        <select name="subtitle_file" required>
+          {% for filename in subtitle_files %}
+            <option value="{{ filename }}">{{ filename }}</option>
+          {% endfor %}
+        </select>
+
+        <label>Video file (optional):</label>
+        <select name="video_file">
+          <option value="">Auto-match by filename</option>
+          {% for filename in video_files %}
+            <option value="{{ filename }}">{{ filename }}</option>
+          {% endfor %}
+        </select>
+
+        <button class="button button--primary" type="submit">Generate timestamped summary</button>
+      </form>
+    {% else %}
+      <p class="meta-text">No subtitle files found in Admin/Media/Other.</p>
+    {% endif %}
+  </section>
+{% endblock %}
