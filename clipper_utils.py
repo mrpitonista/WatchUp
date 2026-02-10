@@ -18,6 +18,9 @@ class SubtitleCue:
 
 TIME_SPLIT_RE = re.compile(r"\s+-->\s+")
 SRT_TIMESTAMP_RE = re.compile(r"(\d{1,2}:\d{2}:\d{2}[\.,]\d{1,3})")
+VTT_INLINE_TIMESTAMP_RE = re.compile(r"<\d{2}:\d{2}:\d{2}\.\d{3}>")
+MIN_CUE_MS = 200
+MERGE_GAP_MS = 120
 
 
 def parse_timestamp_to_ms(value: str) -> int:
@@ -97,6 +100,18 @@ def normalize_text(lines: Iterable[str]) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def clean_vtt_text(text: str) -> str:
+    cleaned = VTT_INLINE_TIMESTAMP_RE.sub("", text)
+    cleaned = re.sub(r"<c(\.[^>]*)?>", "", cleaned)
+    cleaned = re.sub(r"</c>", "", cleaned)
+    cleaned = re.sub(r"<v[^>]*>", "", cleaned)
+    cleaned = re.sub(r"</v>", "", cleaned)
+    cleaned = re.sub(r"</?(?:i|b|u)>", "", cleaned)
+    cleaned = re.sub(r"</?[^>]+>", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
 def parse_srt(path: Path) -> list[SubtitleCue]:
     content = path.read_text(encoding="utf-8", errors="ignore")
     blocks = re.split(r"\n\s*\n", content.strip())
@@ -144,6 +159,7 @@ def parse_vtt(path: Path) -> list[SubtitleCue]:
                         start_ms = parse_timestamp_to_ms(match[0])
                         end_ms = parse_timestamp_to_ms(match[1].split()[0])
                         text = normalize_text(buffer_lines)
+                        text = clean_vtt_text(text)
                         if text:
                             cues.append(SubtitleCue(start_ms=start_ms, end_ms=end_ms, text=text))
                     except ValueError:
@@ -166,11 +182,37 @@ def parse_vtt(path: Path) -> list[SubtitleCue]:
                 start_ms = parse_timestamp_to_ms(match[0])
                 end_ms = parse_timestamp_to_ms(match[1].split()[0])
                 text = normalize_text(buffer_lines)
+                text = clean_vtt_text(text)
                 if text:
                     cues.append(SubtitleCue(start_ms=start_ms, end_ms=end_ms, text=text))
             except ValueError:
                 pass
     return cues
+
+
+def merge_adjacent_duplicate_cues(cues: list[SubtitleCue], merge_gap_ms: int = MERGE_GAP_MS) -> list[SubtitleCue]:
+    if not cues:
+        return []
+    merged: list[SubtitleCue] = [cues[0]]
+    for cue in cues[1:]:
+        previous = merged[-1]
+        gap_ms = cue.start_ms - previous.end_ms
+        prev_text = previous.text.strip()
+        cue_text = cue.text.strip()
+        same_or_prefix = (
+            prev_text == cue_text
+            or prev_text.startswith(cue_text)
+            or cue_text.startswith(prev_text)
+        )
+        if gap_ms <= merge_gap_ms and same_or_prefix:
+            merged[-1] = SubtitleCue(
+                start_ms=previous.start_ms,
+                end_ms=max(previous.end_ms, cue.end_ms),
+                text=prev_text if len(prev_text) >= len(cue_text) else cue_text,
+            )
+            continue
+        merged.append(cue)
+    return merged
 
 
 def generate_clip_subtitles(
@@ -196,6 +238,8 @@ def generate_clip_subtitles(
         cue_end = min(cue.end_ms, clip_end_ms)
         if cue_end <= cue_start:
             continue
+        if (cue_end - cue_start) < MIN_CUE_MS:
+            continue
         clipped_cues.append(
             SubtitleCue(
                 start_ms=cue_start - clip_start_ms,
@@ -203,6 +247,8 @@ def generate_clip_subtitles(
                 text=cue.text,
             )
         )
+
+    clipped_cues = merge_adjacent_duplicate_cues(clipped_cues)
 
     write_srt(clipped_cues, out_srt_path)
     vtt_written = False
