@@ -63,6 +63,14 @@
                   <form method="post" action="{{ url_for('yt.clipper_clip', job_id=manifest.job_id) }}">
                     <input type="hidden" name="segment_index" value="{{ loop.index0 }}">
                     <label class="meta-text">
+                      Subtitle translation
+                      <select name="subtitle_translate_target">
+                        <option value="">No translation</option>
+                        <option value="en">Translate to English (only if not EN/IT)</option>
+                        <option value="it">Translate to Italian (only if not EN/IT)</option>
+                      </select>
+                    </label>
+                    <label class="meta-text">
                       <input type="checkbox" name="mux_mkv" value="1">
                       Also create MKV with subtitles
                     </label>
@@ -82,6 +90,22 @@
                             {% if clip.subtitle_vtt_filename %}
                               <br>
                               <a href="{{ url_for('yt.clipper_download', filename=clip.subtitle_vtt_filename) }}">Download subtitles (.vtt)</a>
+                            {% endif %}
+                            {% if clip.translated_subtitle_filename %}
+                              <br>
+                              {% if clip.translated_subtitle_target == 'en' %}
+                                <a href="{{ url_for('yt.clipper_download', filename=clip.translated_subtitle_filename) }}">Download English subtitles</a>
+                              {% elif clip.translated_subtitle_target == 'it' %}
+                                <a href="{{ url_for('yt.clipper_download', filename=clip.translated_subtitle_filename) }}">Download Italian subtitles</a>
+                              {% endif %}
+                            {% endif %}
+                            {% if clip.translated_subtitle_vtt_filename %}
+                              <br>
+                              {% if clip.translated_subtitle_target == 'en' %}
+                                <a href="{{ url_for('yt.clipper_download', filename=clip.translated_subtitle_vtt_filename) }}">Download English subtitles (.vtt)</a>
+                              {% elif clip.translated_subtitle_target == 'it' %}
+                                <a href="{{ url_for('yt.clipper_download', filename=clip.translated_subtitle_vtt_filename) }}">Download Italian subtitles (.vtt)</a>
+                              {% endif %}
                             {% endif %}
                             {% if clip.mkv_filename %}
                               <br>
