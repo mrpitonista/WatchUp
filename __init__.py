@@ -32,6 +32,7 @@ from clipper_utils import (
 
 this_dir = Path(__file__).resolve().parent
 history_path = this_dir / "download_history.json"
+PROGRESS_LOGS_DIR = this_dir / "progress_logs"
 logger = logging.getLogger(__name__)
 
 PODCAST_ROOT = this_dir / "podcast_files"
@@ -66,6 +67,7 @@ CLIPPER_SUMMARY_DIR.mkdir(exist_ok=True)
 CLIPPER_BLOCKS_DIR.mkdir(exist_ok=True)
 CLIPPER_JOBS_DIR.mkdir(exist_ok=True)
 MEDIA_CLIPS_DIR.mkdir(parents=True, exist_ok=True)
+PROGRESS_LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 ENV_FILE = "openai_api_key.env"
 SCRIPT_MODEL = "gpt-4o-mini"
@@ -863,7 +865,8 @@ def process_script_job(
 def run_download_and_track(cmd, uid):
     """Execute a shell command and stream output to a progress log."""
 
-    log_path = this_dir / f"progress_{uid}.log"
+    PROGRESS_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = PROGRESS_LOGS_DIR / f"progress_{uid}.log"
     with open(log_path, "w") as f:
         try:
             process = subprocess.Popen(
@@ -1328,7 +1331,7 @@ def history():
 @yt_bp.route('/yt/clear_logs')
 def clear_logs():
     deleted = 0
-    for log_file in this_dir.glob("progress_*.log"):
+    for log_file in PROGRESS_LOGS_DIR.glob("progress_*.log"):
         try:
             log_file.unlink()
             deleted += 1
@@ -1349,7 +1352,7 @@ def clear_history():
 
 @yt_bp.route('/yt/progress/<uid>')
 def get_progress(uid):
-    log_path = this_dir / f"progress_{uid}.log"
+    log_path = PROGRESS_LOGS_DIR / f"progress_{uid}.log"
     if not log_path.exists():
         return "Waiting for log...", 200
     return log_path.read_text(), 200
