@@ -20,6 +20,7 @@ from clipper_utils import (
     build_blocks,
     blocks_to_prompt_text,
     find_matching_video,
+    list_clipper_jobs,
     ms_to_timestamp,
     parse_timestamp_to_ms,
     parse_srt,
@@ -49,6 +50,7 @@ CLIPPER_ROOT = this_dir / "clipper_files"
 CLIPPER_SUMMARY_DIR = CLIPPER_ROOT / "summaries"
 CLIPPER_BLOCKS_DIR = CLIPPER_ROOT / "blocks"
 CLIPPER_JOBS_DIR = CLIPPER_ROOT / "jobs"
+CLIPPER_PREVIOUS_JOBS_LIMIT = 15
 
 PODCAST_ROOT.mkdir(exist_ok=True)
 PODCAST_UPLOAD_DIR.mkdir(exist_ok=True)
@@ -938,11 +940,17 @@ def home():
 def clipper():
     subtitle_files = safe_list_media_files(MEDIA_OTHER_DIR, [".srt", ".vtt"])
     video_files = safe_list_media_files(MEDIA_OTHER_DIR, [".mp4", ".mkv", ".webm", ".mov"])
+    previous_jobs = list_clipper_jobs(
+        jobs_dir=CLIPPER_JOBS_DIR,
+        summary_dir=CLIPPER_SUMMARY_DIR,
+        limit=CLIPPER_PREVIOUS_JOBS_LIMIT,
+    )
     return render_template(
         'yt/clipper.html',
         active_page="clipper",
         subtitle_files=subtitle_files,
         video_files=video_files,
+        previous_jobs=previous_jobs,
     )
 
 

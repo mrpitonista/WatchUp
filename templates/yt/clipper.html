@@ -52,4 +52,26 @@
       <p class="meta-text">No subtitle files found in Admin/Media/Other.</p>
     {% endif %}
   </section>
+
+  <section class="card">
+    <h2>Previous jobs</h2>
+    {% if previous_jobs %}
+      <ul class="list-stack">
+        {% for job in previous_jobs %}
+          <li>
+            <a class="history-title" href="{{ url_for('yt.clipper_job', job_id=job.job_id) }}">{{ job.title }}</a>
+            <div class="history-meta">
+              <div>Job ID: <span class="mono">{{ job.job_id }}</span></div>
+              <div>Subtitle: {{ job.subtitle_file }}</div>
+              <div>Video: {{ job.video_file }}</div>
+              <div>Language: {{ job.language }}</div>
+              <div>Model used: {{ job.model }}</div>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="meta-text">No previous jobs yet.</p>
+    {% endif %}
+  </section>
 {% endblock %}

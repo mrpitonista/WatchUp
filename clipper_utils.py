@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
+import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -199,3 +201,73 @@ def find_matching_video(sub_path: Path) -> str | None:
         if candidate.exists():
             return candidate.name
     return None
+
+
+def list_clipper_jobs(jobs_dir: Path, summary_dir: Path, limit: int = 15) -> list[dict]:
+    jobs: list[dict] = []
+    if not jobs_dir.exists():
+        return jobs
+
+    for manifest_path in jobs_dir.glob("*.json"):
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(manifest, dict):
+            continue
+
+        job_id = str(manifest.get("job_id") or manifest_path.stem)
+        created_at = manifest.get("created_at")
+        created_at_dt: datetime | None = None
+        if isinstance(created_at, str):
+            try:
+                created_at_dt = datetime.fromisoformat(created_at)
+            except ValueError:
+                created_at_dt = None
+
+        summary_data: dict = {}
+        summary_path_raw = manifest.get("summary_path")
+        if isinstance(summary_path_raw, str) and summary_path_raw:
+            summary_path = Path(summary_path_raw).resolve()
+            try:
+                summary_path.relative_to(summary_dir.resolve())
+            except ValueError:
+                summary_path = None
+            if summary_path and summary_path.exists():
+                try:
+                    loaded_summary = json.loads(summary_path.read_text())
+                    if isinstance(loaded_summary, dict):
+                        summary_data = loaded_summary
+                except (OSError, json.JSONDecodeError):
+                    summary_data = {}
+
+        subtitle_file = manifest.get("subtitle_file") or "Unknown"
+        video_file = manifest.get("video_file") or "Unknown"
+        language = manifest.get("language") or summary_data.get("language") or "Unknown"
+        model_used = manifest.get("model") or manifest.get("summary_model") or "Unknown"
+        title = (
+            manifest.get("title")
+            or summary_data.get("title")
+            or Path(str(video_file)).stem
+            or "Unknown"
+        )
+
+        sort_value = created_at_dt.timestamp() if created_at_dt else manifest_path.stat().st_mtime
+
+        jobs.append(
+            {
+                "job_id": job_id,
+                "created_at": created_at if isinstance(created_at, str) else None,
+                "subtitle_file": str(subtitle_file),
+                "video_file": str(video_file),
+                "language": str(language),
+                "model": str(model_used),
+                "title": str(title),
+                "_sort_value": sort_value,
+            }
+        )
+
+    jobs.sort(key=lambda item: item["_sort_value"], reverse=True)
+    for job in jobs:
+        job.pop("_sort_value", None)
+    return jobs[:limit]
