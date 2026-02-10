@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import json
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,47 @@ def ms_to_timestamp(ms: int) -> str:
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+
+
+def format_srt_time(ms: int) -> str:
+    total_seconds, millis = divmod(max(0, int(ms)), 1000)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+
+
+def format_vtt_time(ms: int) -> str:
+    total_seconds, millis = divmod(max(0, int(ms)), 1000)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+
+
+def write_srt(cues: list[SubtitleCue], path: Path) -> None:
+    lines: list[str] = []
+    for index, cue in enumerate(cues, start=1):
+        lines.extend(
+            [
+                str(index),
+                f"{format_srt_time(cue.start_ms)} --> {format_srt_time(cue.end_ms)}",
+                cue.text,
+                "",
+            ]
+        )
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def write_vtt(cues: list[SubtitleCue], path: Path) -> None:
+    lines = ["WEBVTT", ""]
+    for cue in cues:
+        lines.extend(
+            [
+                f"{format_vtt_time(cue.start_ms)} --> {format_vtt_time(cue.end_ms)}",
+                cue.text,
+                "",
+            ]
+        )
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
 def normalize_text(lines: Iterable[str]) -> str:
@@ -129,6 +171,85 @@ def parse_vtt(path: Path) -> list[SubtitleCue]:
             except ValueError:
                 pass
     return cues
+
+
+def generate_clip_subtitles(
+    sub_src_path: Path,
+    clip_start_ms: int,
+    clip_end_ms: int,
+    out_srt_path: Path,
+    out_vtt_path: Path | None = None,
+) -> tuple[int, bool]:
+    suffix = sub_src_path.suffix.lower()
+    if suffix == ".srt":
+        source_cues = parse_srt(sub_src_path)
+    elif suffix == ".vtt":
+        source_cues = parse_vtt(sub_src_path)
+    else:
+        raise ValueError("Unsupported subtitle source format.")
+
+    clipped_cues: list[SubtitleCue] = []
+    for cue in source_cues:
+        if cue.end_ms <= clip_start_ms or cue.start_ms >= clip_end_ms:
+            continue
+        cue_start = max(cue.start_ms, clip_start_ms)
+        cue_end = min(cue.end_ms, clip_end_ms)
+        if cue_end <= cue_start:
+            continue
+        clipped_cues.append(
+            SubtitleCue(
+                start_ms=cue_start - clip_start_ms,
+                end_ms=cue_end - clip_start_ms,
+                text=cue.text,
+            )
+        )
+
+    write_srt(clipped_cues, out_srt_path)
+    vtt_written = False
+    if out_vtt_path is not None:
+        write_vtt(clipped_cues, out_vtt_path)
+        vtt_written = True
+    return len(clipped_cues), vtt_written
+
+
+def mux_mkv_ffmpeg(clip_mp4_path: Path, srt_path: Path, out_mkv_path: Path) -> tuple[bool, str]:
+    first_cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(clip_mp4_path),
+        "-i",
+        str(srt_path),
+        "-c",
+        "copy",
+        "-c:s",
+        "srt",
+        str(out_mkv_path),
+    ]
+    fallback_cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(clip_mp4_path),
+        "-i",
+        str(srt_path),
+        "-c:v",
+        "libx264",
+        "-c:a",
+        "aac",
+        "-c:s",
+        "srt",
+        str(out_mkv_path),
+    ]
+    first_run = subprocess.run(first_cmd, capture_output=True, text=True, check=False)
+    if first_run.returncode == 0:
+        return True, first_run.stderr.strip()
+
+    fallback_run = subprocess.run(fallback_cmd, capture_output=True, text=True, check=False)
+    if fallback_run.returncode == 0:
+        return True, (fallback_run.stderr.strip() or first_run.stderr.strip())
+    error_text = fallback_run.stderr.strip() or first_run.stderr.strip() or "ffmpeg mux failed."
+    return False, error_text
 
 
 def build_blocks(
