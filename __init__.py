@@ -20,8 +20,10 @@ from clipper_utils import (
     build_blocks,
     blocks_to_prompt_text,
     find_matching_video,
+    generate_clip_subtitles,
     list_clipper_jobs,
     ms_to_timestamp,
+    mux_mkv_ffmpeg,
     parse_timestamp_to_ms,
     parse_srt,
     parse_vtt,
@@ -1178,6 +1180,8 @@ def clipper_clip(job_id):
         f"{format_clip_timestamp(end)}__seg_{segment_index + 1:02d}.mp4"
     )
     output_path = MEDIA_CLIPS_DIR / output_filename
+    clip_basename = output_path.stem
+    mux_mkv_requested = (request.form.get("mux_mkv") or "").strip() == "1"
 
     logger.info(
         "[CLIPPER] clip seg=%s start=%s end=%s -> output=%s",
@@ -1217,12 +1221,79 @@ def clipper_clip(job_id):
         flash(f"Clip generation failed: {result.stderr}", "danger")
         return redirect(url_for('yt.clipper_job', job_id=job_id))
 
+    subtitle_file_raw = str(manifest.get("subtitle_file") or "").strip()
+    subtitle_src_path: Path | None = None
+    raw_subtitle_path = Path(subtitle_file_raw)
+    if raw_subtitle_path.is_absolute() and raw_subtitle_path.exists():
+        subtitle_src_path = raw_subtitle_path
+    else:
+        subtitle_src_path = resolve_media_other_file(subtitle_file_raw)
+    if not subtitle_src_path:
+        flash("Source subtitle file not found in Admin/Media/Other.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    start_ms = parse_timestamp_to_ms(start)
+    end_ms = parse_timestamp_to_ms(end)
+    subtitle_filename = f"{clip_basename}.srt"
+    subtitle_out_path = MEDIA_CLIPS_DIR / subtitle_filename
+    subtitle_vtt_filename: str | None = None
+    subtitle_vtt_out_path: Path | None = None
+    if subtitle_src_path.suffix.lower() == ".vtt":
+        subtitle_vtt_filename = f"{clip_basename}.vtt"
+        subtitle_vtt_out_path = MEDIA_CLIPS_DIR / subtitle_vtt_filename
+
+    try:
+        cue_count, vtt_written = generate_clip_subtitles(
+            sub_src_path=subtitle_src_path,
+            clip_start_ms=start_ms,
+            clip_end_ms=end_ms,
+            out_srt_path=subtitle_out_path,
+            out_vtt_path=subtitle_vtt_out_path,
+        )
+    except ValueError as exc:
+        logger.error("[CLIPPER] subtitle generation failed: %s", exc)
+        flash("Clip was created, but subtitle generation failed.", "warning")
+        cue_count = 0
+        vtt_written = False
+        subtitle_filename = ""
+        subtitle_vtt_filename = None
+    else:
+        logger.info("[CLIPPER] subtitles generated -> %s cues=%s", subtitle_out_path, cue_count)
+
+    mkv_filename: str | None = None
+    mkv_success = False
+    mkv_out_path = MEDIA_CLIPS_DIR / f"{clip_basename}.mkv"
+    if mux_mkv_requested and subtitle_filename:
+        mux_ok, mux_error = mux_mkv_ffmpeg(output_path, subtitle_out_path, mkv_out_path)
+        mkv_success = mux_ok
+        if mux_ok:
+            mkv_filename = mkv_out_path.name
+        else:
+            logger.error("[CLIPPER] mux mkv failed stderr=%s", mux_error)
+            flash("Clip and subtitles created, but MKV mux failed.", "warning")
+        logger.info(
+            "[CLIPPER] mux mkv requested=%s success=%s path=%s",
+            mux_mkv_requested,
+            mkv_success,
+            mkv_out_path,
+        )
+    else:
+        logger.info(
+            "[CLIPPER] mux mkv requested=%s success=%s path=%s",
+            mux_mkv_requested,
+            mkv_success,
+            mkv_out_path,
+        )
+
     clip_entry = {
         "segment_index": segment_index,
         "start": start,
         "end": end,
         "clip_filename": output_filename,
         "clip_path": str(output_path),
+        "subtitle_filename": subtitle_filename or None,
+        "subtitle_vtt_filename": subtitle_vtt_filename if vtt_written else None,
+        "mkv_filename": mkv_filename,
         "created_at": datetime.now().isoformat(),
     }
     manifest.setdefault("clips", []).append(clip_entry)
@@ -1233,6 +1304,9 @@ def clipper_clip(job_id):
 
 @yt_bp.route('/yt/clipper/download/<path:filename>')
 def clipper_download(filename):
+    allowed_exts = {".mp4", ".mkv", ".srt", ".vtt"}
+    if Path(filename).suffix.lower() not in allowed_exts:
+        abort(404)
     resolved = resolve_clips_file(filename)
     if not resolved:
         abort(404)

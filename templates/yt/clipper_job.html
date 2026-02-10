@@ -62,6 +62,10 @@
                 <td class="clipper-col-action clipper-actions">
                   <form method="post" action="{{ url_for('yt.clipper_clip', job_id=manifest.job_id) }}">
                     <input type="hidden" name="segment_index" value="{{ loop.index0 }}">
+                    <label class="meta-text">
+                      <input type="checkbox" name="mux_mkv" value="1">
+                      Also create MKV with subtitles
+                    </label>
                     <button class="button button--primary" type="submit">Create clip</button>
                   </form>
                   {% if clips_by_segment.get(loop.index0) %}
@@ -70,7 +74,19 @@
                       <ul class="list-stack clipper-clip-list">
                         {% for clip in clips_by_segment[loop.index0] %}
                           <li>
-                            <a href="{{ url_for('yt.clipper_download', filename=clip.clip_filename) }}">Download {{ clip.clip_filename }}</a>
+                            <a href="{{ url_for('yt.clipper_download', filename=clip.clip_filename) }}">Download video ({{ clip.clip_filename }})</a>
+                            {% if clip.subtitle_filename %}
+                              <br>
+                              <a href="{{ url_for('yt.clipper_download', filename=clip.subtitle_filename) }}">Download subtitles (.srt)</a>
+                            {% endif %}
+                            {% if clip.subtitle_vtt_filename %}
+                              <br>
+                              <a href="{{ url_for('yt.clipper_download', filename=clip.subtitle_vtt_filename) }}">Download subtitles (.vtt)</a>
+                            {% endif %}
+                            {% if clip.mkv_filename %}
+                              <br>
+                              <a href="{{ url_for('yt.clipper_download', filename=clip.mkv_filename) }}">Download MKV (subtitled)</a>
+                            {% endif %}
                           </li>
                         {% endfor %}
                       </ul>
