@@ -951,7 +951,7 @@ def clipper_analyze():
     subtitle_filename = (request.form.get("subtitle_file") or "").strip()
     video_filename = (request.form.get("video_file") or "").strip()
     summary_model = (request.form.get("summary_model") or "gpt-4o-mini").strip()
-    allowed_summary_models = {"gpt-4o-mini", "gpt-5-mini"}
+    allowed_summary_models = {"gpt-4o-mini", "gpt-5-mini", "gpt-5.2"}
     if summary_model not in allowed_summary_models:
         summary_model = "gpt-4o-mini"
     subtitle_path = resolve_media_other_file(subtitle_filename)
