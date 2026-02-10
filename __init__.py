@@ -17,17 +17,23 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from werkzeug.utils import secure_filename
 from clipper_utils import (
+    SubtitleCue,
     build_blocks,
     blocks_to_prompt_text,
+    detect_language_text,
     find_matching_video,
     generate_clip_subtitles,
+    get_google_translate_client,
     list_clipper_jobs,
     ms_to_timestamp,
     mux_mkv_ffmpeg,
-    parse_timestamp_to_ms,
     parse_srt,
+    parse_timestamp_to_ms,
     parse_vtt,
     safe_list_media_files,
+    translate_texts,
+    write_srt,
+    write_vtt,
 )
 
 this_dir = Path(__file__).resolve().parent
@@ -53,6 +59,7 @@ CLIPPER_SUMMARY_DIR = CLIPPER_ROOT / "summaries"
 CLIPPER_BLOCKS_DIR = CLIPPER_ROOT / "blocks"
 CLIPPER_JOBS_DIR = CLIPPER_ROOT / "jobs"
 CLIPPER_PREVIOUS_JOBS_LIMIT = 15
+CLIPPER_TRANSLATE_CREDS_PATH = this_dir / "Google_translate_api-463712-b435ed9c8fa8.json"
 
 PODCAST_ROOT.mkdir(exist_ok=True)
 PODCAST_UPLOAD_DIR.mkdir(exist_ok=True)
@@ -273,6 +280,87 @@ def format_duration_seconds(seconds: float) -> str:
     if hours:
         return f"{hours:d}:{minutes:02d}:{secs:02d}"
     return f"{minutes:d}:{secs:02d}"
+
+
+def build_translation_detection_sample(cues: list[SubtitleCue], max_cues: int = 30, max_chars: int = 4000) -> str:
+    texts = [cue.text.strip() for cue in cues if cue.text and cue.text.strip()]
+    sample = " ".join(texts[:max_cues])
+    return sample[:max_chars]
+
+
+def build_translated_cues(cues: list[SubtitleCue], translated_texts: list[str]) -> list[SubtitleCue]:
+    translated_cues: list[SubtitleCue] = []
+    for cue, translated_text in zip(cues, translated_texts):
+        translated_cues.append(
+            SubtitleCue(
+                start_ms=cue.start_ms,
+                end_ms=cue.end_ms,
+                text=translated_text.strip() if translated_text else "",
+            )
+        )
+    return translated_cues
+
+
+def maybe_translate_clip_subtitles(
+    *,
+    job_id: str,
+    segment_index: int,
+    subtitle_out_path: Path,
+    subtitle_vtt_out_path: Path | None,
+    translate_target: str,
+) -> tuple[str | None, str | None]:
+    if translate_target not in {"en", "it"}:
+        return None, None
+
+    logger.info(
+        "[CLIPPER] translate requested target=%s job_id=%s seg=%s",
+        translate_target,
+        job_id,
+        segment_index + 1,
+    )
+
+    if not CLIPPER_TRANSLATE_CREDS_PATH.exists():
+        logger.error("[CLIPPER] translate credentials file missing: %s", CLIPPER_TRANSLATE_CREDS_PATH)
+        flash("Google Translate credentials file is missing. Skipping subtitle translation.", "warning")
+        return None, None
+
+    try:
+        cues = parse_srt(subtitle_out_path)
+    except Exception as exc:
+        logger.error("[CLIPPER] translate parse failed path=%s error=%s", subtitle_out_path, exc)
+        return None, None
+
+    if not cues:
+        return None, None
+
+    sample_text = build_translation_detection_sample(cues)
+    if not sample_text:
+        return None, None
+
+    try:
+        translate_client = get_google_translate_client(CLIPPER_TRANSLATE_CREDS_PATH)
+        detected_language = detect_language_text(translate_client, sample_text)
+        logger.info("[CLIPPER] detected subtitle language=%s", detected_language or "unknown")
+        if detected_language in {"en", "it"}:
+            logger.info("[CLIPPER] translate skipped (detected in {en,it})")
+            return None, None
+
+        source_texts = [cue.text if cue.text.strip() else "" for cue in cues]
+        translated_texts = translate_texts(translate_client, source_texts, translate_target)
+        translated_cues = build_translated_cues(cues, translated_texts)
+
+        translated_srt_path = subtitle_out_path.with_suffix(f".{translate_target}.srt")
+        write_srt(translated_cues, translated_srt_path)
+        translated_vtt_filename: str | None = None
+        if subtitle_vtt_out_path and subtitle_vtt_out_path.exists():
+            translated_vtt_path = subtitle_vtt_out_path.with_suffix(f".{translate_target}.vtt")
+            write_vtt(translated_cues, translated_vtt_path)
+            translated_vtt_filename = translated_vtt_path.name
+        logger.info("[CLIPPER] translated cues=%s -> %s", len(translated_cues), translated_srt_path)
+        return translated_srt_path.name, translated_vtt_filename
+    except Exception as exc:
+        logger.error("[CLIPPER] translate failed target=%s error=%s", translate_target, exc)
+        return None, None
 
 
 def job_status_path(job_id: str) -> Path:
@@ -1182,6 +1270,9 @@ def clipper_clip(job_id):
     output_path = MEDIA_CLIPS_DIR / output_filename
     clip_basename = output_path.stem
     mux_mkv_requested = (request.form.get("mux_mkv") or "").strip() == "1"
+    subtitle_translate_target = (request.form.get("subtitle_translate_target") or "").strip().lower()
+    if subtitle_translate_target not in {"", "en", "it"}:
+        subtitle_translate_target = ""
 
     logger.info(
         "[CLIPPER] clip seg=%s start=%s end=%s -> output=%s",
@@ -1260,6 +1351,20 @@ def clipper_clip(job_id):
     else:
         logger.info("[CLIPPER] subtitles generated -> %s cues=%s", subtitle_out_path, cue_count)
 
+    translated_subtitle_filename: str | None = None
+    translated_subtitle_vtt_filename: str | None = None
+    translated_subtitle_target: str | None = None
+    if subtitle_filename and subtitle_translate_target in {"en", "it"}:
+        translated_subtitle_filename, translated_subtitle_vtt_filename = maybe_translate_clip_subtitles(
+            job_id=job_id,
+            segment_index=segment_index,
+            subtitle_out_path=subtitle_out_path,
+            subtitle_vtt_out_path=subtitle_vtt_out_path if vtt_written else None,
+            translate_target=subtitle_translate_target,
+        )
+        if translated_subtitle_filename:
+            translated_subtitle_target = subtitle_translate_target
+
     mkv_filename: str | None = None
     mkv_success = False
     mkv_out_path = MEDIA_CLIPS_DIR / f"{clip_basename}.mkv"
@@ -1293,6 +1398,9 @@ def clipper_clip(job_id):
         "clip_path": str(output_path),
         "subtitle_filename": subtitle_filename or None,
         "subtitle_vtt_filename": subtitle_vtt_filename if vtt_written else None,
+        "translated_subtitle_filename": translated_subtitle_filename,
+        "translated_subtitle_vtt_filename": translated_subtitle_vtt_filename,
+        "translated_subtitle_target": translated_subtitle_target,
         "mkv_filename": mkv_filename,
         "created_at": datetime.now().isoformat(),
     }

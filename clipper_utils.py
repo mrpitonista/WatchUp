@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import re
 import json
+import html
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
+
+from google.cloud import translate_v2 as translate
+from google.oauth2 import service_account
 
 
 @dataclass
@@ -256,6 +260,38 @@ def generate_clip_subtitles(
         write_vtt(clipped_cues, out_vtt_path)
         vtt_written = True
     return len(clipped_cues), vtt_written
+
+
+def get_google_translate_client(credentials_path: Path) -> translate.Client:
+    credentials = service_account.Credentials.from_service_account_file(str(credentials_path))
+    return translate.Client(credentials=credentials)
+
+
+def detect_language_text(client: translate.Client, text: str) -> str:
+    if not text.strip():
+        return ""
+    detected = client.detect_language(text)
+    if isinstance(detected, list) and detected:
+        detected = detected[0]
+    if isinstance(detected, dict):
+        return str(detected.get("language") or "").lower()
+    return ""
+
+
+def translate_texts(
+    client: translate.Client,
+    texts: list[str],
+    target: str,
+    batch_size: int = 100,
+) -> list[str]:
+    translated: list[str] = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i : i + batch_size]
+        response = client.translate(batch, target_language=target, format_="text")
+        if isinstance(response, dict):
+            response = [response]
+        translated.extend(html.unescape(str(item.get("translatedText") or "")) for item in response)
+    return translated
 
 
 def mux_mkv_ffmpeg(clip_mp4_path: Path, srt_path: Path, out_mkv_path: Path) -> tuple[bool, str]:
