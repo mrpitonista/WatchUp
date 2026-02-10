@@ -302,6 +302,36 @@ td {
     white-space: nowrap;
 }
 
+
+.clipper-meta {
+    opacity: 0.85;
+    margin-bottom: 6px;
+}
+
+.clipper-headline {
+    font-weight: 650;
+    margin-top: 6px;
+}
+
+.clipper-actions {
+    white-space: normal;
+}
+
+.clipper-col-compact {
+    width: 260px;
+    max-width: 260px;
+}
+
+.clipper-col-action {
+    width: 220px;
+    max-width: 220px;
+}
+
+.clipper-clip-list {
+    gap: 4px;
+    margin: 0;
+}
+
 .text-link {
     display: inline-flex;
     margin-top: 8px;

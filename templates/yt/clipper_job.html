@@ -40,34 +40,26 @@
         <table>
           <thead>
             <tr>
-              <th>Start</th>
-              <th>End</th>
-              <th>Dur</th>
-              <th>Headline</th>
+              <th class="clipper-col-compact">Segment</th>
               <th>Summary</th>
-              <th>Keywords</th>
-              <th>Action</th>
+              <th class="clipper-col-action">Action</th>
             </tr>
           </thead>
           <tbody>
             {% for segment in segments %}
               <tr>
-                <td class="mono">{{ segment.start }}</td>
-                <td class="mono">{{ segment.end }}</td>
-                <td class="mono">{{ segment.duration_label or '' }}</td>
-                <td>{{ segment.headline or 'Segment ' ~ loop.index }}</td>
+                <td class="clipper-col-compact">
+                  <div class="clipper-meta mono">{{ segment.start }} → {{ segment.end }}</div>
+                  <div class="clipper-meta mono">{{ segment.duration_label or '' }}</div>
+                  <div class="clipper-headline">{{ segment.headline or 'Segment ' ~ loop.index }}</div>
+                </td>
                 <td>
                   <div>{{ segment.summary }}</div>
                   {% if segment.why_it_matters %}
                     <div class="meta-text">Why it matters: {{ segment.why_it_matters }}</div>
                   {% endif %}
                 </td>
-                <td>
-                  {% if segment.keywords %}
-                    {{ segment.keywords | join(', ') }}
-                  {% endif %}
-                </td>
-                <td>
+                <td class="clipper-col-action clipper-actions">
                   <form method="post" action="{{ url_for('yt.clipper_clip', job_id=manifest.job_id) }}">
                     <input type="hidden" name="segment_index" value="{{ loop.index0 }}">
                     <button class="button button--primary" type="submit">Create clip</button>
@@ -75,7 +67,7 @@
                   {% if clips_by_segment.get(loop.index0) %}
                     <div class="link-row">
                       <p class="meta-text">Generated clips:</p>
-                      <ul class="list-stack">
+                      <ul class="list-stack clipper-clip-list">
                         {% for clip in clips_by_segment[loop.index0] %}
                           <li>
                             <a href="{{ url_for('yt.clipper_download', filename=clip.clip_filename) }}">Download {{ clip.clip_filename }}</a>
