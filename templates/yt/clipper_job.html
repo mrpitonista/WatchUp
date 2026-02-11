@@ -110,6 +110,12 @@
                             {% if clip.mkv_filename %}
                               <br>
                               <a href="{{ url_for('yt.clipper_download', filename=clip.mkv_filename) }}">Download MKV (subtitled)</a>
+                              <br>
+                              {% if clip.mkv_subtitle_filename and clip.translated_subtitle_filename and clip.mkv_subtitle_filename == clip.translated_subtitle_filename and clip.translated_subtitle_target in ['en', 'it'] %}
+                                <span class="meta-text">MKV subtitles: translated ({{ clip.translated_subtitle_target }})</span>
+                              {% else %}
+                                <span class="meta-text">MKV subtitles: original</span>
+                              {% endif %}
                             {% endif %}
                           </li>
                         {% endfor %}

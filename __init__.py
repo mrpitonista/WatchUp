@@ -1366,6 +1366,7 @@ def clipper_clip(job_id):
     translated_subtitle_filename: str | None = None
     translated_subtitle_vtt_filename: str | None = None
     translated_subtitle_target: str | None = None
+    translated_subtitle_path: Path | None = None
     if subtitle_filename and subtitle_translate_target in {"en", "it"}:
         translated_subtitle_filename, translated_subtitle_vtt_filename = maybe_translate_clip_subtitles(
             job_id=job_id,
@@ -1376,24 +1377,43 @@ def clipper_clip(job_id):
         )
         if translated_subtitle_filename:
             translated_subtitle_target = subtitle_translate_target
+            translated_subtitle_path = MEDIA_CLIPS_DIR / translated_subtitle_filename
 
     mkv_filename: str | None = None
+    mkv_subtitle_filename: str | None = None
+    mkv_subtitle_kind = "original"
     mkv_success = False
     mkv_out_path = MEDIA_CLIPS_DIR / f"{clip_basename}.mkv"
     if mux_mkv_requested and subtitle_filename:
-        mux_ok, mux_error = mux_mkv_ffmpeg(output_path, subtitle_out_path, mkv_out_path)
+        mux_subtitle_path = subtitle_out_path
+        if translated_subtitle_path and translated_subtitle_path.exists():
+            mux_subtitle_path = translated_subtitle_path
+            mkv_subtitle_kind = "translated"
+
+        mkv_subtitle_filename = mux_subtitle_path.name
+        mux_ok, mux_error = mux_mkv_ffmpeg(output_path, mux_subtitle_path, mkv_out_path)
         mkv_success = mux_ok
         if mux_ok:
             mkv_filename = mkv_out_path.name
         else:
             logger.error("[CLIPPER] mux mkv failed stderr=%s", mux_error)
             flash("Clip and subtitles created, but MKV mux failed.", "warning")
-        logger.info(
-            "[CLIPPER] mux mkv requested=%s success=%s path=%s",
-            mux_mkv_requested,
-            mkv_success,
-            mkv_out_path,
-        )
+        if mkv_subtitle_kind == "translated":
+            logger.info(
+                "[CLIPPER] mux requested=%s mux_subtitles=%s target=%s path=%s",
+                mux_mkv_requested,
+                mkv_subtitle_kind,
+                translated_subtitle_target,
+                mux_subtitle_path,
+            )
+        else:
+            logger.info(
+                "[CLIPPER] mux requested=%s mux_subtitles=%s path=%s",
+                mux_mkv_requested,
+                mkv_subtitle_kind,
+                mux_subtitle_path,
+            )
+        logger.info("[CLIPPER] mux mkv requested=%s success=%s path=%s", mux_mkv_requested, mkv_success, mkv_out_path)
     else:
         logger.info(
             "[CLIPPER] mux mkv requested=%s success=%s path=%s",
@@ -1411,9 +1431,11 @@ def clipper_clip(job_id):
         "subtitle_filename": subtitle_filename or None,
         "subtitle_vtt_filename": subtitle_vtt_filename if vtt_written else None,
         "translated_subtitle_filename": translated_subtitle_filename,
+        "subtitle_translated_filename": translated_subtitle_filename,
         "translated_subtitle_vtt_filename": translated_subtitle_vtt_filename,
         "translated_subtitle_target": translated_subtitle_target,
         "mkv_filename": mkv_filename,
+        "mkv_subtitle_filename": mkv_subtitle_filename,
         "created_at": datetime.now().isoformat(),
     }
     manifest.setdefault("clips", []).append(clip_entry)
