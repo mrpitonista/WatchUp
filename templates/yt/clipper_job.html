@@ -30,7 +30,14 @@
       Language: {{ summary.language or 'Unknown' }}<br>
       Original language: {{ source_language }}<br>
       Sections identified: {{ segments_count }}<br>
-      Model used: {{ manifest.summary_model or 'gpt-4o-mini' }}
+      Model used: {{ manifest.summary_model or 'gpt-4o-mini' }}<br>
+      {% if transcript_pdf_exists %}
+        <a href="{{ url_for('yt.clipper_download_transcript', job_id=manifest.job_id) }}">Download transcript PDF</a>
+      {% else %}
+        <form method="post" action="{{ url_for('yt.clipper_generate_transcript', job_id=manifest.job_id) }}" style="display:inline;">
+          <button class="button" type="submit">Generate transcript PDF</button>
+        </form>
+      {% endif %}
     </p>
     {% if summary.error %}
       <p class="flash flash-danger">{{ summary.error }}</p>

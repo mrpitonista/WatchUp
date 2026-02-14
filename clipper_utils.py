@@ -11,6 +11,13 @@ from typing import Iterable
 
 from google.cloud import translate_v2 as translate
 from google.oauth2 import service_account
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import LETTER
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
 
 @dataclass
@@ -114,6 +121,177 @@ def clean_vtt_text(text: str) -> str:
     cleaned = re.sub(r"</?[^>]+>", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip()
+
+
+def find_verdana_ttf() -> Path | None:
+    candidates = [
+        Path("/Library/Fonts/Verdana.ttf"),
+        Path("/System/Library/Fonts/Supplemental/Verdana.ttf"),
+    ]
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def build_transcript_paragraphs(cues: list[SubtitleCue]) -> list[dict[str, str]]:
+    paragraphs: list[dict[str, str]] = []
+    current_lines: list[str] = []
+    current_start_ms: int | None = None
+    current_length = 0
+    previous_end_ms: int | None = None
+
+    for cue in cues:
+        text = clean_vtt_text(html.unescape(cue.text.strip()))
+        if not text:
+            continue
+
+        gap_ms = cue.start_ms - previous_end_ms if previous_end_ms is not None else 0
+        should_split = (
+            bool(current_lines)
+            and (
+                gap_ms > 1200
+                or current_length + len(text) > 850
+            )
+        )
+        if should_split and current_start_ms is not None:
+            paragraphs.append(
+                {
+                    "ts": ms_to_timestamp(current_start_ms).split(".")[0],
+                    "text": " ".join(current_lines).strip(),
+                }
+            )
+            current_lines = []
+            current_length = 0
+            current_start_ms = None
+
+        if current_start_ms is None:
+            current_start_ms = cue.start_ms
+        current_lines.append(text)
+        current_length += len(text)
+        previous_end_ms = cue.end_ms
+
+    if current_lines and current_start_ms is not None:
+        paragraphs.append(
+            {
+                "ts": ms_to_timestamp(current_start_ms).split(".")[0],
+                "text": " ".join(current_lines).strip(),
+            }
+        )
+
+    return [p for p in paragraphs if p["text"]]
+
+
+def generate_transcript_pdf(
+    *,
+    title: str,
+    video_filename: str,
+    subtitle_filename: str,
+    duration_label: str,
+    source_language: str,
+    job_id: str,
+    cues: list[SubtitleCue],
+    out_pdf_path: Path,
+    generated_at: datetime | None = None,
+    verdana_path: Path | None = None,
+) -> int:
+    if not cues:
+        raise ValueError("No subtitle cues found for transcript generation.")
+
+    if verdana_path is None:
+        verdana_path = find_verdana_ttf()
+    if verdana_path is None:
+        raise FileNotFoundError("Verdana font not found.")
+
+    pdfmetrics.registerFont(TTFont("Verdana", str(verdana_path)))
+    pdfmetrics.registerFont(TTFont("Verdana-Bold", str(verdana_path)))
+
+    paragraphs = build_transcript_paragraphs(cues)
+    if not paragraphs:
+        raise ValueError("No transcript paragraphs generated from subtitle cues.")
+
+    out_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+
+    doc = SimpleDocTemplate(
+        str(out_pdf_path),
+        pagesize=LETTER,
+        leftMargin=0.8 * inch,
+        rightMargin=0.8 * inch,
+        topMargin=0.8 * inch,
+        bottomMargin=0.8 * inch,
+        title=title,
+    )
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "TranscriptTitle",
+        parent=styles["Title"],
+        fontName="Verdana-Bold",
+        fontSize=18,
+        leading=24,
+        textColor=colors.HexColor("#111827"),
+        spaceAfter=8,
+    )
+    meta_style = ParagraphStyle(
+        "TranscriptMeta",
+        parent=styles["Normal"],
+        fontName="Verdana",
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor("#374151"),
+        spaceAfter=2,
+    )
+    label_style = ParagraphStyle(
+        "TranscriptLabel",
+        parent=styles["Normal"],
+        fontName="Verdana",
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor("#6b7280"),
+        spaceAfter=2,
+    )
+    body_style = ParagraphStyle(
+        "TranscriptBody",
+        parent=styles["Normal"],
+        fontName="Verdana",
+        fontSize=11,
+        leading=16,
+        textColor=colors.HexColor("#111827"),
+        spaceAfter=10,
+    )
+
+    created_at = generated_at or datetime.now()
+    header_rows = [
+        f"<b>Video filename:</b> {html.escape(video_filename)}",
+        f"<b>Subtitle filename:</b> {html.escape(subtitle_filename)}",
+        f"<b>Duration:</b> {html.escape(duration_label)}",
+        f"<b>Source language:</b> {html.escape(source_language)}",
+        f"<b>Job ID:</b> {html.escape(job_id)}",
+        f"<b>Generated:</b> {created_at.strftime('%Y-%m-%d %H:%M:%S')}",
+    ]
+
+    story: list = [
+        Paragraph(html.escape(title), title_style),
+        Spacer(1, 4),
+    ]
+    for row in header_rows:
+        story.append(Paragraph(row, meta_style))
+    story.append(Spacer(1, 12))
+
+    for paragraph in paragraphs:
+        label = f"[{paragraph['ts']}]"
+        body = html.escape(paragraph["text"])
+        story.append(Paragraph(label, label_style))
+        story.append(Paragraph(body, body_style))
+
+    def _draw_page_number(canvas, _doc):
+        canvas.saveState()
+        canvas.setFont("Verdana", 9)
+        canvas.setFillColor(colors.HexColor("#6b7280"))
+        canvas.drawRightString(LETTER[0] - 0.8 * inch, 0.5 * inch, f"Page {canvas.getPageNumber()}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=_draw_page_number, onLaterPages=_draw_page_number)
+    return len(paragraphs)
 
 
 def parse_srt(path: Path) -> list[SubtitleCue]:
