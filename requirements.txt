@@ -4,3 +4,4 @@ aria2c
 openai
 python-dotenv
 google-cloud-translate
+reportlab

@@ -21,6 +21,8 @@ from clipper_utils import (
     build_blocks,
     blocks_to_prompt_text,
     detect_language_text,
+    find_verdana_ttf,
+    generate_transcript_pdf,
     find_matching_video,
     generate_clip_subtitles,
     get_google_translate_client,
@@ -59,6 +61,7 @@ CLIPPER_ROOT = this_dir / "clipper_files"
 CLIPPER_SUMMARY_DIR = CLIPPER_ROOT / "summaries"
 CLIPPER_BLOCKS_DIR = CLIPPER_ROOT / "blocks"
 CLIPPER_JOBS_DIR = CLIPPER_ROOT / "jobs"
+CLIPPER_TRANSCRIPTS_DIR = CLIPPER_ROOT / "transcripts"
 CLIPPER_PREVIOUS_JOBS_LIMIT = 15
 CLIPPER_TRANSLATE_CREDS_PATH = this_dir / "Google_translate_api-463712-b435ed9c8fa8.json"
 
@@ -73,6 +76,7 @@ CLIPPER_ROOT.mkdir(exist_ok=True)
 CLIPPER_SUMMARY_DIR.mkdir(exist_ok=True)
 CLIPPER_BLOCKS_DIR.mkdir(exist_ok=True)
 CLIPPER_JOBS_DIR.mkdir(exist_ok=True)
+CLIPPER_TRANSCRIPTS_DIR.mkdir(exist_ok=True)
 MEDIA_CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 PROGRESS_LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -273,6 +277,28 @@ def resolve_clips_file(filename: str) -> Path | None:
     candidate = (MEDIA_CLIPS_DIR / filename).resolve()
     try:
         candidate.relative_to(MEDIA_CLIPS_DIR.resolve())
+    except ValueError:
+        return None
+    if not candidate.exists():
+        return None
+    return candidate
+
+
+def clipper_transcript_dir(job_id: str) -> Path:
+    return CLIPPER_TRANSCRIPTS_DIR / job_id
+
+
+def clipper_transcript_path(job_id: str, video_stem: str) -> Path:
+    return clipper_transcript_dir(job_id) / f"{video_stem}__transcript.pdf"
+
+
+def resolve_clipper_transcript_file(job_id: str, filename: str) -> Path | None:
+    if not filename or Path(filename).name != filename:
+        return None
+    base_dir = clipper_transcript_dir(job_id).resolve()
+    candidate = (base_dir / filename).resolve()
+    try:
+        candidate.relative_to(base_dir)
     except ValueError:
         return None
     if not candidate.exists():
@@ -1262,6 +1288,15 @@ def clipper_job(job_id):
         seg_index = clip.get("segment_index")
         if isinstance(seg_index, int):
             clips_by_segment.setdefault(seg_index, []).append(clip)
+
+    transcript_pdf_filename = ""
+    transcript_pdf_exists = False
+    video_stem = Path(manifest.get("video_file") or "video").stem
+    transcript_path = clipper_transcript_path(job_id, video_stem)
+    if transcript_path.exists():
+        transcript_pdf_filename = transcript_path.name
+        transcript_pdf_exists = True
+
     return render_template(
         'yt/clipper_job.html',
         active_page="clipper",
@@ -1272,6 +1307,115 @@ def clipper_job(job_id):
         source_language=source_language,
         video_duration=video_duration,
         clips_by_segment=clips_by_segment,
+        transcript_pdf_exists=transcript_pdf_exists,
+        transcript_pdf_filename=transcript_pdf_filename,
+    )
+
+
+@yt_bp.route('/yt/clipper/job/<job_id>/transcript', methods=['POST'])
+def clipper_generate_transcript(job_id):
+    manifest = load_clipper_job(job_id)
+    if not manifest:
+        flash("Clipper job not found.", "danger")
+        return redirect(url_for('yt.clipper'))
+
+    subtitle_file = str(manifest.get("subtitle_file") or "").strip()
+    subtitle_path = resolve_media_other_file(subtitle_file)
+    if not subtitle_path:
+        flash("Subtitle source not found in Admin/Media/Other.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    if subtitle_path.suffix.lower() == ".srt":
+        cues = parse_srt(subtitle_path)
+    elif subtitle_path.suffix.lower() == ".vtt":
+        cues = parse_vtt(subtitle_path)
+    else:
+        flash("Unsupported subtitle format. Use .srt or .vtt.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    if not cues:
+        flash("No subtitle cues were found for transcript generation.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    video_file = str(manifest.get("video_file") or "").strip()
+    video_stem = Path(video_file or subtitle_path.stem).stem
+    transcript_pdf_path = clipper_transcript_path(job_id, video_stem)
+    summary_title = ""
+    summary_language = ""
+    summary_path = Path(manifest.get("summary_path", ""))
+    if summary_path.exists():
+        try:
+            summary_data = json.loads(summary_path.read_text())
+            if isinstance(summary_data, dict):
+                summary_title = str(summary_data.get("title") or "").strip()
+                summary_language = str(summary_data.get("language") or "").strip()
+        except json.JSONDecodeError:
+            pass
+
+    title = summary_title or video_stem
+    duration_label = "Unknown"
+    if video_file:
+        video_path = resolve_media_other_file(video_file)
+        if video_path:
+            duration_label = get_video_duration_hhmmss(video_path)
+    source_language = summary_language or str(manifest.get("language") or "").strip() or "unknown"
+
+    verdana_path = find_verdana_ttf()
+    if not verdana_path:
+        attempted = [
+            "/Library/Fonts/Verdana.ttf",
+            "/System/Library/Fonts/Supplemental/Verdana.ttf",
+        ]
+        logger.error("[CLIPPER] transcript_pdf error=Verdana not found attempted=%s", attempted)
+        flash("Verdana font not found on server; install Verdana.ttf or update font path.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    try:
+        paragraph_count = generate_transcript_pdf(
+            title=title,
+            video_filename=video_file or "Unknown",
+            subtitle_filename=subtitle_path.name,
+            duration_label=duration_label,
+            source_language=source_language,
+            job_id=job_id,
+            cues=cues,
+            out_pdf_path=transcript_pdf_path,
+            verdana_path=verdana_path,
+        )
+    except Exception as exc:
+        logger.exception("[CLIPPER] transcript_pdf job_id=%s failed", job_id)
+        flash(f"Transcript PDF generation failed: {exc}", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    logger.info(
+        "[CLIPPER] transcript_pdf job_id=%s cues=%s paragraphs=%s out=%s",
+        job_id,
+        len(cues),
+        paragraph_count,
+        transcript_pdf_path,
+    )
+    flash("Transcript PDF generated.", "success")
+    return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+
+@yt_bp.route('/yt/clipper/job/<job_id>/transcript.pdf', methods=['GET'])
+def clipper_download_transcript(job_id):
+    manifest = load_clipper_job(job_id)
+    if not manifest:
+        flash("Clipper job not found.", "danger")
+        return redirect(url_for('yt.clipper'))
+
+    video_stem = Path(manifest.get("video_file") or "video").stem
+    expected_name = f"{video_stem}__transcript.pdf"
+    transcript_path = resolve_clipper_transcript_file(job_id, expected_name)
+    if not transcript_path:
+        flash("Transcript PDF not found for this job.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+    return send_from_directory(
+        transcript_path.parent,
+        transcript_path.name,
+        as_attachment=True,
+        download_name=transcript_path.name,
     )
 
 
