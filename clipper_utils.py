@@ -34,6 +34,115 @@ MIN_CUE_MS = 200
 MERGE_GAP_MS = 120
 
 
+def _normalize_merge_text(text: str) -> str:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in str(text).splitlines()]
+    return "\n".join(line for line in lines if line).strip()
+
+
+def merge_text_two_lines(
+    a: str,
+    b: str,
+    max_lines: int = 2,
+    max_chars_per_line: int = 120,
+) -> str:
+    left = _normalize_merge_text(a)
+    right = _normalize_merge_text(b)
+    if not left:
+        return right
+    if not right:
+        return left
+
+    left_lower = left.lower()
+    right_lower = right.lower()
+    if left_lower in right_lower:
+        merged = right if len(right) >= len(left) else left
+    elif right_lower in left_lower:
+        merged = left if len(left) >= len(right) else right
+    else:
+        lines: list[str] = []
+        for line in left.split("\n") + right.split("\n"):
+            clean_line = re.sub(r"\s+", " ", line).strip()
+            if not clean_line:
+                continue
+            if clean_line not in lines:
+                lines.append(clean_line)
+
+        merged_lines = lines[: max(1, max_lines)]
+        merged = "\n".join(merged_lines)
+
+    if max_chars_per_line > 0:
+        constrained_lines = []
+        for line in merged.split("\n"):
+            constrained_lines.append(line[:max_chars_per_line].rstrip())
+        merged = "\n".join(line for line in constrained_lines if line)
+    return merged.strip()
+
+
+def merge_overlapping_cues(
+    cues: list[SubtitleCue | dict | tuple],
+    max_lines: int = 2,
+    max_chars_per_line: int = 120,
+    gap_merge_ms: int = 250,
+) -> list[SubtitleCue]:
+    normalized: list[SubtitleCue] = []
+    for cue in cues:
+        if isinstance(cue, SubtitleCue):
+            normalized.append(cue)
+            continue
+        if isinstance(cue, dict):
+            start_ms = int(cue.get("start_ms", 0))
+            end_ms = int(cue.get("end_ms", 0))
+            text = str(cue.get("text", ""))
+            normalized.append(SubtitleCue(start_ms=start_ms, end_ms=end_ms, text=text))
+            continue
+        if isinstance(cue, tuple) and len(cue) >= 3:
+            start_ms, end_ms, text = cue[:3]
+            normalized.append(SubtitleCue(start_ms=int(start_ms), end_ms=int(end_ms), text=str(text)))
+
+    if not normalized:
+        return []
+
+    ordered = sorted(normalized, key=lambda item: (item.start_ms, item.end_ms))
+    merged: list[SubtitleCue] = []
+    i = 0
+    while i < len(ordered):
+        current = ordered[i]
+        while i + 1 < len(ordered) and ordered[i + 1].start_ms < current.end_ms:
+            nxt = ordered[i + 1]
+            current = SubtitleCue(
+                start_ms=min(current.start_ms, nxt.start_ms),
+                end_ms=max(current.end_ms, nxt.end_ms),
+                text=merge_text_two_lines(
+                    current.text,
+                    nxt.text,
+                    max_lines=max_lines,
+                    max_chars_per_line=max_chars_per_line,
+                ),
+            )
+            i += 1
+        if current.end_ms > current.start_ms:
+            merged.append(current)
+        i += 1
+
+    if len(merged) < 2:
+        return merged
+
+    normalized_gap = max(0, int(gap_merge_ms))
+    non_overlapping: list[SubtitleCue] = [merged[0]]
+    for cue in merged[1:]:
+        previous = non_overlapping[-1]
+        if previous.end_ms >= cue.start_ms and (previous.end_ms - cue.start_ms) <= normalized_gap:
+            clamped_end = max(previous.start_ms + 1, cue.start_ms)
+            non_overlapping[-1] = SubtitleCue(
+                start_ms=previous.start_ms,
+                end_ms=clamped_end,
+                text=previous.text,
+            )
+        if cue.end_ms > cue.start_ms:
+            non_overlapping.append(cue)
+    return non_overlapping
+
+
 def parse_timestamp_to_ms(value: str) -> int:
     normalized = value.strip().replace(",", ".")
     parts = normalized.split(":")
@@ -403,7 +512,7 @@ def generate_clip_subtitles(
     clip_end_ms: int,
     out_srt_path: Path,
     out_vtt_path: Path | None = None,
-) -> tuple[int, bool]:
+) -> tuple[int, int, bool]:
     suffix = sub_src_path.suffix.lower()
     if suffix == ".srt":
         source_cues = parse_srt(sub_src_path)
@@ -431,13 +540,16 @@ def generate_clip_subtitles(
         )
 
     clipped_cues = merge_adjacent_duplicate_cues(clipped_cues)
+    cues_before_merge = len(clipped_cues)
+    clipped_cues = merge_overlapping_cues(clipped_cues)
+    cues_after_merge = len(clipped_cues)
 
     write_srt(clipped_cues, out_srt_path)
     vtt_written = False
     if out_vtt_path is not None:
         write_vtt(clipped_cues, out_vtt_path)
         vtt_written = True
-    return len(clipped_cues), vtt_written
+    return cues_before_merge, cues_after_merge, vtt_written
 
 
 def get_google_translate_client(credentials_path: Path) -> translate.Client:
