@@ -405,9 +405,15 @@ def maybe_translate_clip_subtitles(
         translate_client = get_google_translate_client(CLIPPER_TRANSLATE_CREDS_PATH)
         detected_language = detect_language_text(translate_client, sample_text)
         logger.info("[CLIPPER] detected subtitle language=%s", detected_language or "unknown")
-        if detected_language in {"en", "it"}:
-            logger.info("[CLIPPER] translate skipped (detected in {en,it})")
+        if detected_language == translate_target:
+            logger.info("[CLIPPER] translate skipped already target=%s", translate_target)
             return None, None
+
+        logger.info(
+            "[CLIPPER] translate requested target=%s detected=%s -> translating",
+            translate_target,
+            detected_language or "unknown",
+        )
 
         source_texts = [cue.text if cue.text.strip() else "" for cue in cues]
         translated_texts = translate_texts(translate_client, source_texts, translate_target)
