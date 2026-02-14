@@ -38,6 +38,22 @@
           <button class="button" type="submit">Generate transcript PDF</button>
         </form>
       {% endif %}
+      <br>
+      <strong>Translated subtitles (full video)</strong>
+      <form method="post" action="{{ url_for('yt.clipper_translate_full_subs', job_id=manifest.job_id) }}" style="display:inline; margin-left: 6px;">
+        <select name="subs_translate_target">
+          <option value="">Select language</option>
+          <option value="en">English</option>
+          <option value="it">Italian</option>
+        </select>
+        <button class="button" type="submit">Generate translated SRT</button>
+      </form>
+      {% for item in fullsubs_translation_targets %}
+        {% if item.exists %}
+          <br>
+          <a href="{{ url_for('yt.clipper_download_translation', job_id=manifest.job_id, target=item.code) }}">Download {{ item.label }} SRT</a>
+        {% endif %}
+      {% endfor %}
     </p>
     {% if summary.error %}
       <p class="flash flash-danger">{{ summary.error }}</p>

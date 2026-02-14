@@ -24,6 +24,7 @@ from clipper_utils import (
     find_verdana_ttf,
     generate_transcript_pdf,
     find_matching_video,
+    full_video_translate_subtitles,
     generate_clip_subtitles,
     get_google_translate_client,
     list_clipper_jobs,
@@ -63,6 +64,7 @@ CLIPPER_SUMMARY_DIR = CLIPPER_ROOT / "summaries"
 CLIPPER_BLOCKS_DIR = CLIPPER_ROOT / "blocks"
 CLIPPER_JOBS_DIR = CLIPPER_ROOT / "jobs"
 CLIPPER_TRANSCRIPTS_DIR = CLIPPER_ROOT / "transcripts"
+CLIPPER_TRANSLATIONS_DIR = CLIPPER_ROOT / "translations"
 CLIPPER_PREVIOUS_JOBS_LIMIT = 15
 CLIPPER_TRANSLATE_CREDS_PATH = this_dir / "Google_translate_api-463712-b435ed9c8fa8.json"
 
@@ -78,6 +80,7 @@ CLIPPER_SUMMARY_DIR.mkdir(exist_ok=True)
 CLIPPER_BLOCKS_DIR.mkdir(exist_ok=True)
 CLIPPER_JOBS_DIR.mkdir(exist_ok=True)
 CLIPPER_TRANSCRIPTS_DIR.mkdir(exist_ok=True)
+CLIPPER_TRANSLATIONS_DIR.mkdir(exist_ok=True)
 MEDIA_CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 PROGRESS_LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -303,6 +306,32 @@ def resolve_clipper_transcript_file(job_id: str, filename: str) -> Path | None:
     except ValueError:
         return None
     if not candidate.exists():
+        return None
+    return candidate
+
+
+def clipper_translation_dir(job_id: str) -> Path:
+    return CLIPPER_TRANSLATIONS_DIR / job_id
+
+
+def clipper_translation_filename(subtitle_filename: str, target: str) -> str:
+    return f"{Path(subtitle_filename).stem}.{target}.srt"
+
+
+def clipper_translation_path(job_id: str, subtitle_filename: str, target: str) -> Path:
+    return clipper_translation_dir(job_id) / clipper_translation_filename(subtitle_filename, target)
+
+
+def resolve_clipper_translation_file(job_id: str, target: str, subtitle_filename: str) -> Path | None:
+    if target not in {"en", "it"}:
+        return None
+    base_dir = clipper_translation_dir(job_id).resolve()
+    candidate = (base_dir / clipper_translation_filename(subtitle_filename, target)).resolve()
+    try:
+        candidate.relative_to(base_dir)
+    except ValueError:
+        return None
+    if not candidate.exists() or candidate.suffix.lower() != ".srt":
         return None
     return candidate
 
@@ -1319,6 +1348,20 @@ def clipper_job(job_id):
         transcript_pdf_filename = transcript_path.name
         transcript_pdf_exists = True
 
+    subtitle_filename = str(manifest.get("subtitle_file") or "").strip()
+    fullsubs_translation_targets = [
+        {
+            "code": "en",
+            "label": "English",
+            "exists": bool(resolve_clipper_translation_file(job_id, "en", subtitle_filename)),
+        },
+        {
+            "code": "it",
+            "label": "Italian",
+            "exists": bool(resolve_clipper_translation_file(job_id, "it", subtitle_filename)),
+        },
+    ]
+
     return render_template(
         'yt/clipper_job.html',
         active_page="clipper",
@@ -1331,6 +1374,7 @@ def clipper_job(job_id):
         clips_by_segment=clips_by_segment,
         transcript_pdf_exists=transcript_pdf_exists,
         transcript_pdf_filename=transcript_pdf_filename,
+        fullsubs_translation_targets=fullsubs_translation_targets,
     )
 
 
@@ -1438,6 +1482,91 @@ def clipper_download_transcript(job_id):
         transcript_path.name,
         as_attachment=True,
         download_name=transcript_path.name,
+    )
+
+
+@yt_bp.route('/yt/clipper/job/<job_id>/translate-subs', methods=['POST'])
+def clipper_translate_full_subs(job_id):
+    manifest = load_clipper_job(job_id)
+    if not manifest:
+        flash("Clipper job not found.", "danger")
+        return redirect(url_for('yt.clipper'))
+
+    target = (request.form.get("subs_translate_target") or "").strip().lower()
+    if target not in {"en", "it"}:
+        flash("Select a valid target language (English or Italian).", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    subtitle_file = str(manifest.get("subtitle_file") or "").strip()
+    subtitle_path = resolve_media_other_file(subtitle_file)
+    if not subtitle_path:
+        flash("Subtitle source not found in Admin/Media/Other.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    if subtitle_path.suffix.lower() not in {".srt", ".vtt"}:
+        flash("Unsupported subtitle format. Use .srt or .vtt.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    if not CLIPPER_TRANSLATE_CREDS_PATH.exists():
+        logger.error("[CLIPPER] translate credentials file missing: %s", CLIPPER_TRANSLATE_CREDS_PATH)
+        flash("Google Translate credentials file is missing.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    output_path = clipper_translation_path(job_id, subtitle_path.name, target)
+    logger.info(
+        "[CLIPPER] fullsubs_translate job_id=%s target=%s subtitle=%s",
+        job_id,
+        target,
+        subtitle_path,
+    )
+    try:
+        result = full_video_translate_subtitles(
+            subtitle_path=subtitle_path,
+            target_language=target,
+            output_srt_path=output_path,
+            credentials_path=CLIPPER_TRANSLATE_CREDS_PATH,
+            job_id=job_id,
+        )
+    except Exception as exc:
+        logger.exception("[CLIPPER] fullsubs_translate job_id=%s failed", job_id)
+        flash(f"Subtitle translation failed: {exc}", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    status = str(result.get("status") or "")
+    detected = str(result.get("detected_language") or "")
+    lang_label = "English" if target == "en" else "Italian"
+    if status == "skipped":
+        logger.info("[CLIPPER] skip translate: source already target (%s)", target)
+        display_lang = detected or target
+        flash(f"Source already {display_lang}; no translation generated.", "info")
+    else:
+        flash(f"Translated full subtitles generated ({lang_label}).", "success")
+
+    return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+
+@yt_bp.route('/yt/clipper/job/<job_id>/download-translation/<target>', methods=['GET'])
+def clipper_download_translation(job_id, target):
+    manifest = load_clipper_job(job_id)
+    if not manifest:
+        flash("Clipper job not found.", "danger")
+        return redirect(url_for('yt.clipper'))
+
+    normalized_target = (target or "").strip().lower()
+    if normalized_target not in {"en", "it"}:
+        abort(404)
+
+    subtitle_file = str(manifest.get("subtitle_file") or "").strip()
+    translation_path = resolve_clipper_translation_file(job_id, normalized_target, subtitle_file)
+    if not translation_path:
+        flash("Translated SRT not found for this job/language.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    return send_from_directory(
+        translation_path.parent,
+        translation_path.name,
+        as_attachment=True,
+        download_name=translation_path.name,
     )
 
 

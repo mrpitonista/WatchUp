@@ -4,6 +4,7 @@ import re
 import json
 import html
 import subprocess
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,9 @@ from reportlab.lib.units import inch
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -582,6 +586,172 @@ def translate_texts(
             response = [response]
         translated.extend(html.unescape(str(item.get("translatedText") or "")) for item in response)
     return translated
+
+
+def batch_texts_for_translation(
+    cues: list[SubtitleCue],
+    max_chars: int = 7500,
+    max_cues: int = 120,
+    max_minutes: int = 8,
+) -> list[list[int]]:
+    batches: list[list[int]] = []
+    current_batch: list[int] = []
+    current_chars = 0
+    batch_start_ms: int | None = None
+    max_span_ms = max(1, int(max_minutes)) * 60 * 1000
+
+    for index, cue in enumerate(cues):
+        text = str(cue.text or "").strip()
+        if not text:
+            continue
+
+        if batch_start_ms is None:
+            projected_span_ms = 0
+        else:
+            projected_span_ms = max(0, cue.end_ms - batch_start_ms)
+        projected_chars = current_chars + len(text)
+        projected_count = len(current_batch) + 1
+        exceeds_limits = (
+            current_batch
+            and (
+                projected_chars > max_chars
+                or projected_count > max_cues
+                or projected_span_ms > max_span_ms
+            )
+        )
+        if exceeds_limits:
+            batches.append(current_batch)
+            current_batch = []
+            current_chars = 0
+            batch_start_ms = None
+
+        if batch_start_ms is None:
+            batch_start_ms = cue.start_ms
+        current_batch.append(index)
+        current_chars += len(text)
+
+    if current_batch:
+        batches.append(current_batch)
+    return batches
+
+
+def full_video_translate_subtitles(
+    *,
+    subtitle_path: Path,
+    target_language: str,
+    output_srt_path: Path,
+    credentials_path: Path,
+    job_id: str,
+    max_chars: int = 7500,
+    max_cues: int = 120,
+    max_minutes: int = 8,
+) -> dict[str, str | int | bool]:
+    suffix = subtitle_path.suffix.lower()
+    if suffix == ".srt":
+        source_cues = parse_srt(subtitle_path)
+    elif suffix == ".vtt":
+        source_cues = parse_vtt(subtitle_path)
+    else:
+        raise ValueError("Unsupported subtitle source format.")
+
+    if not source_cues:
+        raise ValueError("No subtitle cues found in source file.")
+
+    sample_chunks: list[str] = []
+    sample_length = 0
+    for cue in source_cues:
+        text = str(cue.text or "").strip()
+        if not text:
+            continue
+        if len(sample_chunks) >= 30 or sample_length >= 4000:
+            break
+        sample_chunks.append(text)
+        sample_length += len(text)
+    sample_text = " ".join(sample_chunks)[:4000]
+
+    client = get_google_translate_client(credentials_path)
+    detected_language = detect_language_text(client, sample_text) if sample_text else ""
+
+    if detected_language == target_language:
+        logger.info("[CLIPPER] skip translate: source already target (%s)", target_language)
+        return {
+            "status": "skipped",
+            "detected_language": detected_language,
+            "cues_before": len(source_cues),
+            "cues_after": len(source_cues),
+            "batches": 0,
+            "written": False,
+        }
+
+    batches = batch_texts_for_translation(
+        source_cues,
+        max_chars=max_chars,
+        max_cues=max_cues,
+        max_minutes=max_minutes,
+    )
+
+    translated_text_by_index: dict[int, str] = {}
+    for batch_indices in batches:
+        texts = [source_cues[idx].text.strip() for idx in batch_indices]
+        translated_batch = translate_texts(
+            client,
+            texts,
+            target_language,
+            batch_size=len(texts) or 1,
+        )
+        for idx, translated in zip(batch_indices, translated_batch):
+            translated_text_by_index[idx] = translated.strip()
+
+    translated_cues: list[SubtitleCue] = []
+    for idx, cue in enumerate(source_cues):
+        translated_cues.append(
+            SubtitleCue(
+                start_ms=cue.start_ms,
+                end_ms=cue.end_ms,
+                text=translated_text_by_index.get(idx, ""),
+            )
+        )
+
+    cues_before_merge = len(translated_cues)
+    translated_cues = merge_overlapping_cues(translated_cues, max_lines=2)
+    cues_after_merge = len(translated_cues)
+    output_srt_path.parent.mkdir(parents=True, exist_ok=True)
+    write_srt(translated_cues, output_srt_path)
+
+    logger.info(
+        "[CLIPPER] fullsubs_translate job_id=%s target=%s subtitle=%s",
+        job_id,
+        target_language,
+        subtitle_path,
+    )
+    logger.info(
+        "[CLIPPER] detected_source_lang=%s target=%s -> translating",
+        detected_language or "unknown",
+        target_language,
+    )
+    logger.info(
+        "[CLIPPER] batching total_cues=%s batches=%s max_chars=%s max_cues=%s max_minutes=%s",
+        len(source_cues),
+        len(batches),
+        max_chars,
+        max_cues,
+        max_minutes,
+    )
+    logger.info(
+        "[CLIPPER] overlap-merge translated cues_before=%s cues_after=%s",
+        cues_before_merge,
+        cues_after_merge,
+    )
+    logger.info("[CLIPPER] wrote translated srt -> %s", output_srt_path)
+
+    return {
+        "status": "translated",
+        "detected_language": detected_language,
+        "cues_before": cues_before_merge,
+        "cues_after": cues_after_merge,
+        "batches": len(batches),
+        "written": True,
+    }
 
 
 def mux_mkv_ffmpeg(clip_mp4_path: Path, srt_path: Path, out_mkv_path: Path) -> tuple[bool, str]:
