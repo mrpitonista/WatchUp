@@ -293,6 +293,33 @@ def format_duration_seconds(seconds: float) -> str:
     return f"{minutes:d}:{secs:02d}"
 
 
+def get_video_duration_hhmmss(video_path: Path) -> str:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(video_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        duration_seconds = float(result.stdout.strip())
+        total_seconds = max(0, int(round(duration_seconds)))
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as exc:
+        logger.error("[CLIPPER] failed to probe video duration path=%s error=%s", video_path, exc)
+        return "Unknown"
+
+
 def build_translation_detection_sample(cues: list[SubtitleCue], max_cues: int = 30, max_chars: int = 4000) -> str:
     texts = [cue.text.strip() for cue in cues if cue.text and cue.text.strip()]
     sample = " ".join(texts[:max_cues])
@@ -1207,6 +1234,16 @@ def clipper_job(job_id):
         summary_data = {"segments": [], "error": "Summary JSON is invalid."}
 
     segments = summary_data.get("segments", [])
+    segments_count = len(segments) if isinstance(segments, list) else 0
+    source_language = summary_data.get("language") or manifest.get("language") or "unknown"
+
+    video_duration = "Unknown"
+    video_filename = manifest.get("video_file")
+    if isinstance(video_filename, str):
+        video_path = resolve_media_other_file(video_filename)
+        if video_path:
+            video_duration = get_video_duration_hhmmss(video_path)
+
     for segment in segments:
         if not isinstance(segment, dict):
             continue
@@ -1231,6 +1268,9 @@ def clipper_job(job_id):
         manifest=manifest,
         summary=summary_data,
         segments=segments,
+        segments_count=segments_count,
+        source_language=source_language,
+        video_duration=video_duration,
         clips_by_segment=clips_by_segment,
     )
 
