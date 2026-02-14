@@ -28,6 +28,7 @@ from clipper_utils import (
     get_google_translate_client,
     list_clipper_jobs,
     ms_to_timestamp,
+    merge_overlapping_cues,
     mux_mkv_ffmpeg,
     parse_srt,
     parse_timestamp_to_ms,
@@ -418,13 +419,28 @@ def maybe_translate_clip_subtitles(
         source_texts = [cue.text if cue.text.strip() else "" for cue in cues]
         translated_texts = translate_texts(translate_client, source_texts, translate_target)
         translated_cues = build_translated_cues(cues, translated_texts)
+        translated_before_merge = len(translated_cues)
+        translated_cues = merge_overlapping_cues(translated_cues)
+        translated_after_merge = len(translated_cues)
 
         translated_srt_path = subtitle_out_path.with_suffix(f".{translate_target}.srt")
         write_srt(translated_cues, translated_srt_path)
+        logger.info(
+            "[CLIPPER] overlap-merge subtitles file=%s cues_before=%s cues_after=%s",
+            translated_srt_path,
+            translated_before_merge,
+            translated_after_merge,
+        )
         translated_vtt_filename: str | None = None
         if subtitle_vtt_out_path and subtitle_vtt_out_path.exists():
             translated_vtt_path = subtitle_vtt_out_path.with_suffix(f".{translate_target}.vtt")
             write_vtt(translated_cues, translated_vtt_path)
+            logger.info(
+                "[CLIPPER] overlap-merge subtitles file=%s cues_before=%s cues_after=%s",
+                translated_vtt_path,
+                translated_before_merge,
+                translated_after_merge,
+            )
             translated_vtt_filename = translated_vtt_path.name
         logger.info("[CLIPPER] translated cues=%s -> %s", len(translated_cues), translated_srt_path)
         return translated_srt_path.name, translated_vtt_filename
@@ -1536,7 +1552,7 @@ def clipper_clip(job_id):
         subtitle_vtt_out_path = MEDIA_CLIPS_DIR / subtitle_vtt_filename
 
     try:
-        cue_count, vtt_written = generate_clip_subtitles(
+        cues_before_merge, cue_count, vtt_written = generate_clip_subtitles(
             sub_src_path=subtitle_src_path,
             clip_start_ms=start_ms,
             clip_end_ms=end_ms,
@@ -1551,6 +1567,19 @@ def clipper_clip(job_id):
         subtitle_filename = ""
         subtitle_vtt_filename = None
     else:
+        logger.info(
+            "[CLIPPER] overlap-merge subtitles file=%s cues_before=%s cues_after=%s",
+            subtitle_out_path,
+            cues_before_merge,
+            cue_count,
+        )
+        if vtt_written and subtitle_vtt_out_path is not None:
+            logger.info(
+                "[CLIPPER] overlap-merge subtitles file=%s cues_before=%s cues_after=%s",
+                subtitle_vtt_out_path,
+                cues_before_merge,
+                cue_count,
+            )
         logger.info("[CLIPPER] subtitles generated -> %s cues=%s", subtitle_out_path, cue_count)
 
     translated_subtitle_filename: str | None = None
