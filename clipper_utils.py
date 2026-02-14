@@ -87,6 +87,9 @@ def merge_overlapping_cues(
     max_lines: int = 2,
     max_chars_per_line: int = 120,
     gap_merge_ms: int = 250,
+    max_group_duration_ms: int = 12000,
+    max_overlap_merge_ms: int = 3000,
+    max_group_cues: int = 5,
 ) -> list[SubtitleCue]:
     normalized: list[SubtitleCue] = []
     for cue in cues:
@@ -111,11 +114,26 @@ def merge_overlapping_cues(
     i = 0
     while i < len(ordered):
         current = ordered[i]
-        while i + 1 < len(ordered) and ordered[i + 1].start_ms < current.end_ms:
+        group_cues = 1
+        while i + 1 < len(ordered):
             nxt = ordered[i + 1]
+            if nxt.start_ms >= current.end_ms:
+                break
+
+            overlap_ms = current.end_ms - nxt.start_ms
+            new_start = min(current.start_ms, nxt.start_ms)
+            new_end = max(current.end_ms, nxt.end_ms)
+            merged_duration_ms = new_end - new_start
+            if (
+                overlap_ms > max(0, int(max_overlap_merge_ms))
+                or merged_duration_ms > max(1, int(max_group_duration_ms))
+                or (group_cues + 1) > max(1, int(max_group_cues))
+            ):
+                break
+
             current = SubtitleCue(
-                start_ms=min(current.start_ms, nxt.start_ms),
-                end_ms=max(current.end_ms, nxt.end_ms),
+                start_ms=new_start,
+                end_ms=new_end,
                 text=merge_text_two_lines(
                     current.text,
                     nxt.text,
@@ -123,6 +141,7 @@ def merge_overlapping_cues(
                     max_chars_per_line=max_chars_per_line,
                 ),
             )
+            group_cues += 1
             i += 1
         if current.end_ms > current.start_ms:
             merged.append(current)
@@ -135,8 +154,12 @@ def merge_overlapping_cues(
     non_overlapping: list[SubtitleCue] = [merged[0]]
     for cue in merged[1:]:
         previous = non_overlapping[-1]
-        if previous.end_ms >= cue.start_ms and (previous.end_ms - cue.start_ms) <= normalized_gap:
-            clamped_end = max(previous.start_ms + 1, cue.start_ms)
+        if (
+            previous.end_ms > cue.start_ms
+            and (previous.end_ms - cue.start_ms) <= normalized_gap
+            and cue.start_ms > previous.start_ms
+        ):
+            clamped_end = max(previous.start_ms + 1, min(previous.end_ms, cue.start_ms))
             non_overlapping[-1] = SubtitleCue(
                 start_ms=previous.start_ms,
                 end_ms=clamped_end,
@@ -715,6 +738,7 @@ def full_video_translate_subtitles(
     cues_before_merge = len(translated_cues)
     translated_cues = merge_overlapping_cues(translated_cues, max_lines=2)
     cues_after_merge = len(translated_cues)
+    max_cue_ms = max((cue.end_ms - cue.start_ms) for cue in translated_cues) if translated_cues else 0
     output_srt_path.parent.mkdir(parents=True, exist_ok=True)
     write_srt(translated_cues, output_srt_path)
 
@@ -738,9 +762,10 @@ def full_video_translate_subtitles(
         max_minutes,
     )
     logger.info(
-        "[CLIPPER] overlap-merge translated cues_before=%s cues_after=%s",
+        "[CLIPPER] overlap-merge translated cues_before=%s cues_after=%s max_cue_ms=%s",
         cues_before_merge,
         cues_after_merge,
+        max_cue_ms,
     )
     logger.info("[CLIPPER] wrote translated srt -> %s", output_srt_path)
 
@@ -753,6 +778,26 @@ def full_video_translate_subtitles(
         "written": True,
     }
 
+
+
+
+def _dev_sanity_check_overlap_merge() -> None:
+    sample_cues = [
+        SubtitleCue(0, 2200, "a"),
+        SubtitleCue(1800, 3600, "b"),
+        SubtitleCue(3400, 5200, "c"),
+        SubtitleCue(5100, 6900, "d"),
+        SubtitleCue(6700, 8500, "e"),
+        SubtitleCue(8300, 10100, "f"),
+        SubtitleCue(20000, 21500, "g"),
+    ]
+    merged = merge_overlapping_cues(sample_cues, max_lines=2)
+    max_duration = max((cue.end_ms - cue.start_ms) for cue in merged) if merged else 0
+    print(f"dev_sanity total_cues={len(sample_cues)} merged_cues={len(merged)} max_merged_duration_ms={max_duration}")
+
+
+if __name__ == "__main__":
+    _dev_sanity_check_overlap_merge()
 
 def mux_mkv_ffmpeg(clip_mp4_path: Path, srt_path: Path, out_mkv_path: Path) -> tuple[bool, str]:
     first_cmd = [
