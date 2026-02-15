@@ -18,7 +18,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
 logger = logging.getLogger(__name__)
@@ -523,6 +523,150 @@ def generate_transcript_pdf(
 
     doc.build(story, onFirstPage=_draw_page_number, onLaterPages=_draw_page_number)
     return len(paragraphs)
+
+
+def generate_summary_pdf(job_meta: dict, summary: dict, out_path: Path) -> None:
+    verdana_path = find_verdana_ttf()
+    base_font = "Helvetica"
+    bold_font = "Helvetica-Bold"
+    if verdana_path:
+        pdfmetrics.registerFont(TTFont("Verdana", str(verdana_path)))
+        pdfmetrics.registerFont(TTFont("Verdana-Bold", str(verdana_path)))
+        base_font = "Verdana"
+        bold_font = "Verdana-Bold"
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    doc = SimpleDocTemplate(
+        str(out_path),
+        pagesize=LETTER,
+        leftMargin=0.7 * inch,
+        rightMargin=0.7 * inch,
+        topMargin=0.7 * inch,
+        bottomMargin=0.7 * inch,
+        title=str(job_meta.get("title") or "Summary"),
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "SummaryPdfTitle",
+        parent=styles["Title"],
+        fontName=bold_font,
+        fontSize=20,
+        leading=25,
+        textColor=colors.HexColor("#111827"),
+        spaceAfter=8,
+    )
+    meta_style = ParagraphStyle(
+        "SummaryPdfMeta",
+        parent=styles["Normal"],
+        fontName=base_font,
+        fontSize=10,
+        leading=13,
+        textColor=colors.HexColor("#374151"),
+    )
+    table_header_style = ParagraphStyle(
+        "SummaryPdfTableHeader",
+        parent=styles["Normal"],
+        fontName=bold_font,
+        fontSize=11,
+        leading=14,
+        textColor=colors.HexColor("#111827"),
+    )
+    segment_style = ParagraphStyle(
+        "SummaryPdfSegment",
+        parent=styles["Normal"],
+        fontName=base_font,
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor("#111827"),
+    )
+    summary_style = ParagraphStyle(
+        "SummaryPdfSummary",
+        parent=styles["Normal"],
+        fontName=base_font,
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor("#111827"),
+    )
+    meta_rows = [
+        ("Job ID", str(job_meta.get("job_id") or "Unknown")),
+        ("Subtitle", str(job_meta.get("subtitle") or "Unknown")),
+        ("Video", str(job_meta.get("video") or "Unknown")),
+        ("Duration", str(job_meta.get("duration") or "Unknown")),
+        ("Language", str(job_meta.get("language") or "Unknown")),
+        ("Original language", str(job_meta.get("original_language") or "Unknown")),
+        ("Sections identified", str(job_meta.get("sections_identified") or 0)),
+        ("Model used", str(job_meta.get("model_used") or "Unknown")),
+    ]
+
+    title = html.escape(str(job_meta.get("title") or "Summary").strip() or "Summary")
+    story: list = [Paragraph(title, title_style), Spacer(1, 4)]
+    for label, value in meta_rows:
+        story.append(Paragraph(f"<b>{html.escape(label)}:</b> {html.escape(value)}", meta_style))
+    story.append(Spacer(1, 12))
+
+    segments = summary.get("segments", []) if isinstance(summary, dict) else []
+    if not isinstance(segments, list):
+        segments = []
+
+    table_data: list[list[Paragraph]] = [
+        [Paragraph("Segment", table_header_style), Paragraph("Summary", table_header_style)]
+    ]
+    for idx, segment in enumerate(segments, start=1):
+        if not isinstance(segment, dict):
+            continue
+        start = html.escape(str(segment.get("start") or "Unknown"))
+        end = html.escape(str(segment.get("end") or "Unknown"))
+        duration = html.escape(str(segment.get("duration_label") or ""))
+        headline = html.escape(str(segment.get("headline") or f"Segment {idx}"))
+        summary_text = html.escape(str(segment.get("summary") or ""))
+        why = html.escape(str(segment.get("why_it_matters") or ""))
+
+        left_parts = [f"{start} &#8594; {end}"]
+        if duration:
+            left_parts.append(duration)
+        left_parts.append(f"<b>{headline}</b>")
+        left_cell = Paragraph("<br/>".join(left_parts), segment_style)
+
+        right_parts = [f"<para>{summary_text}</para>"]
+        if why:
+            right_parts.append(
+                f"<para><font color='#6b7280' size='9'>Why it matters: {why}</font></para>"
+            )
+        right_cell = Paragraph("".join(right_parts), summary_style)
+        table_data.append([left_cell, right_cell])
+
+    usable_width = LETTER[0] - doc.leftMargin - doc.rightMargin
+    segments_table = Table(
+        table_data,
+        colWidths=[usable_width * 0.3, usable_width * 0.7],
+        repeatRows=1,
+    )
+    segments_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f3f4f6")),
+                ("LINEBELOW", (0, 0), (-1, 0), 1, colors.HexColor("#d1d5db")),
+                ("LINEBELOW", (0, 1), (-1, -1), 0.5, colors.HexColor("#e5e7eb")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+            ]
+        )
+    )
+    story.append(segments_table)
+
+    def _draw_page_number(canvas, _doc):
+        canvas.saveState()
+        canvas.setFont(base_font, 9)
+        canvas.setFillColor(colors.HexColor("#6b7280"))
+        canvas.drawRightString(LETTER[0] - doc.rightMargin, 0.45 * inch, f"Page {canvas.getPageNumber()}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=_draw_page_number, onLaterPages=_draw_page_number)
 
 
 def parse_srt(path: Path) -> list[SubtitleCue]:
