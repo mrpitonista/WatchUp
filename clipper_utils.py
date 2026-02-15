@@ -170,6 +170,101 @@ def merge_overlapping_cues(
     return non_overlapping
 
 
+def resolve_overlaps_by_trimming(
+    cues: list[SubtitleCue | dict | tuple],
+    epsilon_ms: int = 1,
+    min_duration_ms: int = 250,
+) -> list[SubtitleCue]:
+    normalized: list[SubtitleCue] = []
+    for cue in cues:
+        if isinstance(cue, SubtitleCue):
+            normalized.append(SubtitleCue(start_ms=int(cue.start_ms), end_ms=int(cue.end_ms), text=str(cue.text)))
+            continue
+        if isinstance(cue, dict):
+            normalized.append(
+                SubtitleCue(
+                    start_ms=int(cue.get("start_ms", 0)),
+                    end_ms=int(cue.get("end_ms", 0)),
+                    text=str(cue.get("text", "")),
+                )
+            )
+            continue
+        if isinstance(cue, tuple) and len(cue) >= 3:
+            start_ms, end_ms, text = cue[:3]
+            normalized.append(SubtitleCue(start_ms=int(start_ms), end_ms=int(end_ms), text=str(text)))
+
+    if not normalized:
+        logger.info("[CLIPPER] trim-overlap before=0 after=0 adjusted=0 dropped=0")
+        return []
+
+    epsilon_ms = max(0, int(epsilon_ms))
+    min_duration_ms = max(1, int(min_duration_ms))
+    ordered = sorted(normalized, key=lambda item: (item.start_ms, item.end_ms))
+    original_ends = [cue.end_ms for cue in ordered]
+
+    overlaps_before = sum(1 for i in range(len(ordered) - 1) if ordered[i].end_ms > ordered[i + 1].start_ms)
+    adjusted_indexes: set[int] = set()
+
+    for index in range(len(ordered) - 1):
+        cur = ordered[index]
+        nxt = ordered[index + 1]
+        if cur.end_ms <= nxt.start_ms:
+            continue
+
+        latest_allowed_end = nxt.start_ms - epsilon_ms
+        new_end = max(cur.start_ms + min_duration_ms, latest_allowed_end)
+        if new_end > latest_allowed_end:
+            new_end = max(cur.start_ms + 1, latest_allowed_end)
+
+        new_end = min(new_end, original_ends[index])
+        if new_end > latest_allowed_end:
+            new_end = latest_allowed_end
+
+        if new_end <= cur.start_ms:
+            new_end = min(max(cur.start_ms + 1, 0), original_ends[index])
+
+        if new_end != cur.end_ms:
+            cur.end_ms = int(new_end)
+            adjusted_indexes.add(index)
+
+    kept: list[SubtitleCue] = []
+    dropped_count = 0
+    for cue in ordered:
+        if cue.end_ms <= cue.start_ms:
+            dropped_count += 1
+            continue
+        kept.append(cue)
+
+    for index in range(len(kept) - 1):
+        cur = kept[index]
+        nxt = kept[index + 1]
+        if cur.end_ms <= nxt.start_ms:
+            continue
+        clamped_end = max(cur.start_ms + 1, nxt.start_ms - epsilon_ms)
+        if clamped_end != cur.end_ms:
+            cur.end_ms = clamped_end
+            adjusted_indexes.add(index)
+
+    final_cues: list[SubtitleCue] = []
+    for cue in kept:
+        if cue.end_ms <= cue.start_ms:
+            dropped_count += 1
+            continue
+        final_cues.append(cue)
+
+    overlaps_after = sum(1 for i in range(len(final_cues) - 1) if final_cues[i].end_ms > final_cues[i + 1].start_ms)
+    logger.info(
+        "[CLIPPER] trim-overlap before=%s after=%s adjusted=%s dropped=%s epsilon_ms=%s min_duration_ms=%s",
+        overlaps_before,
+        overlaps_after,
+        len(adjusted_indexes),
+        dropped_count,
+        epsilon_ms,
+        min_duration_ms,
+    )
+    return final_cues
+
+
 def parse_timestamp_to_ms(value: str) -> int:
     normalized = value.strip().replace(",", ".")
     parts = normalized.split(":")
@@ -735,12 +830,20 @@ def full_video_translate_subtitles(
             )
         )
 
-    cues_before_merge = len(translated_cues)
-    translated_cues = merge_overlapping_cues(translated_cues, max_lines=2)
-    cues_after_merge = len(translated_cues)
+    cues_before_trim = len(translated_cues)
+    translated_cues = resolve_overlaps_by_trimming(translated_cues, epsilon_ms=1, min_duration_ms=250)
+    cues_after_trim = len(translated_cues)
     max_cue_ms = max((cue.end_ms - cue.start_ms) for cue in translated_cues) if translated_cues else 0
     output_srt_path.parent.mkdir(parents=True, exist_ok=True)
     write_srt(translated_cues, output_srt_path)
+
+    if cues_before_trim and cues_after_trim < int(cues_before_trim * 0.85):
+        logger.warning(
+            "[CLIPPER] fullsubs_translate low cue retention job_id=%s cues_before=%s cues_after=%s",
+            job_id,
+            cues_before_trim,
+            cues_after_trim,
+        )
 
     logger.info(
         "[CLIPPER] fullsubs_translate job_id=%s target=%s subtitle=%s",
@@ -762,18 +865,20 @@ def full_video_translate_subtitles(
         max_minutes,
     )
     logger.info(
-        "[CLIPPER] overlap-merge translated cues_before=%s cues_after=%s max_cue_ms=%s",
-        cues_before_merge,
-        cues_after_merge,
+        "[CLIPPER] overlap-trim translated cues_before=%s cues_after=%s max_cue_ms=%s",
+        cues_before_trim,
+        cues_after_trim,
         max_cue_ms,
     )
     logger.info("[CLIPPER] wrote translated srt -> %s", output_srt_path)
+    logger.info(
+        "[CLIPPER] manual-check note: run full-video translated subtitles on an overlapping SRT and verify cue count remains close, overlaps_after=0, and playback no longer stacks.")
 
     return {
         "status": "translated",
         "detected_language": detected_language,
-        "cues_before": cues_before_merge,
-        "cues_after": cues_after_merge,
+        "cues_before": cues_before_trim,
+        "cues_after": cues_after_trim,
         "batches": len(batches),
         "written": True,
     }
