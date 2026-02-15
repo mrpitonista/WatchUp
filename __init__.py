@@ -22,6 +22,7 @@ from clipper_utils import (
     blocks_to_prompt_text,
     detect_language_text,
     find_verdana_ttf,
+    generate_summary_pdf,
     generate_transcript_pdf,
     find_matching_video,
     full_video_translate_subtitles,
@@ -64,6 +65,7 @@ CLIPPER_SUMMARY_DIR = CLIPPER_ROOT / "summaries"
 CLIPPER_BLOCKS_DIR = CLIPPER_ROOT / "blocks"
 CLIPPER_JOBS_DIR = CLIPPER_ROOT / "jobs"
 CLIPPER_TRANSCRIPTS_DIR = CLIPPER_ROOT / "transcripts"
+CLIPPER_SUMMARY_PDFS_DIR = CLIPPER_ROOT / "summary_pdfs"
 CLIPPER_TRANSLATIONS_DIR = CLIPPER_ROOT / "translations"
 CLIPPER_PREVIOUS_JOBS_LIMIT = 15
 CLIPPER_TRANSLATE_CREDS_PATH = this_dir / "Google_translate_api-463712-b435ed9c8fa8.json"
@@ -80,6 +82,7 @@ CLIPPER_SUMMARY_DIR.mkdir(exist_ok=True)
 CLIPPER_BLOCKS_DIR.mkdir(exist_ok=True)
 CLIPPER_JOBS_DIR.mkdir(exist_ok=True)
 CLIPPER_TRANSCRIPTS_DIR.mkdir(exist_ok=True)
+CLIPPER_SUMMARY_PDFS_DIR.mkdir(exist_ok=True)
 CLIPPER_TRANSLATIONS_DIR.mkdir(exist_ok=True)
 MEDIA_CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 PROGRESS_LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -294,6 +297,33 @@ def clipper_transcript_dir(job_id: str) -> Path:
 
 def clipper_transcript_path(job_id: str, video_stem: str) -> Path:
     return clipper_transcript_dir(job_id) / f"{video_stem}__transcript.pdf"
+
+
+def clipper_summary_pdf_dir(job_id: str) -> Path:
+    return CLIPPER_SUMMARY_PDFS_DIR / job_id
+
+
+def clipper_summary_pdf_filename(video_filename: str) -> str:
+    video_stem = secure_filename(Path(video_filename or "video").stem) or "video"
+    return f"{video_stem}__summary.pdf"
+
+
+def clipper_summary_pdf_path(job_id: str, video_filename: str) -> Path:
+    return clipper_summary_pdf_dir(job_id) / clipper_summary_pdf_filename(video_filename)
+
+
+def resolve_clipper_summary_pdf_file(job_id: str, filename: str) -> Path | None:
+    if not filename or Path(filename).name != filename:
+        return None
+    base_dir = clipper_summary_pdf_dir(job_id).resolve()
+    candidate = (base_dir / filename).resolve()
+    try:
+        candidate.relative_to(base_dir)
+    except ValueError:
+        return None
+    if not candidate.exists() or candidate.suffix.lower() != ".pdf":
+        return None
+    return candidate
 
 
 def resolve_clipper_transcript_file(job_id: str, filename: str) -> Path | None:
@@ -1274,10 +1304,46 @@ def clipper_analyze():
             normalized_segments.append(segment)
         summary_data["segments"] = normalized_segments
 
+    segments = summary_data.get("segments", []) if isinstance(summary_data, dict) else []
+    if not isinstance(segments, list):
+        segments = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        start = segment.get("start")
+        end = segment.get("end")
+        if not start or not end:
+            continue
+        try:
+            duration_seconds = max(0, (parse_timestamp_to_ms(end) - parse_timestamp_to_ms(start)) / 1000)
+        except ValueError:
+            continue
+        segment["duration_label"] = format_duration_seconds(duration_seconds)
+
     summary_path = job_summary_dir / f"{subtitle_path.stem}_summary.json"
     summary_pretty_path = job_summary_dir / f"{subtitle_path.stem}_summary_pretty.json"
     summary_path.write_text(json.dumps(summary_data))
     summary_pretty_path.write_text(json.dumps(summary_data, indent=2))
+
+    video_duration = get_video_duration_hhmmss(video_path)
+    source_language = str(summary_data.get("language") or "Unknown")
+    summary_pdf_path = clipper_summary_pdf_path(job_id, video_path.name)
+    summary_pdf_meta = {
+        "title": str(summary_data.get("title") or Path(video_path.name).stem),
+        "job_id": job_id,
+        "subtitle": subtitle_path.name,
+        "video": video_path.name,
+        "duration": video_duration,
+        "language": str(summary_data.get("language") or "Unknown"),
+        "original_language": source_language,
+        "sections_identified": len([seg for seg in segments if isinstance(seg, dict)]),
+        "model_used": summary_model,
+    }
+    try:
+        generate_summary_pdf(summary_pdf_meta, summary_data, summary_pdf_path)
+        logger.info("[CLIPPER] summary_pdf generated job_id=%s path=%s", job_id, summary_pdf_path)
+    except Exception:
+        logger.exception("[CLIPPER] summary_pdf generation failed job_id=%s", job_id)
 
     manifest = {
         "job_id": job_id,
@@ -1285,6 +1351,7 @@ def clipper_analyze():
         "subtitle_file": subtitle_path.name,
         "video_file": video_path.name,
         "summary_path": str(summary_path),
+        "summary_pdf_path": str(summary_pdf_path) if summary_pdf_path.exists() else "",
         "summary_model": summary_model,
         "clips": [],
     }
@@ -1348,6 +1415,18 @@ def clipper_job(job_id):
         transcript_pdf_filename = transcript_path.name
         transcript_pdf_exists = True
 
+    summary_pdf_filename = ""
+    summary_pdf_exists = False
+    summary_pdf_path_raw = str(manifest.get("summary_pdf_path") or "").strip()
+    summary_pdf_path = Path(summary_pdf_path_raw) if summary_pdf_path_raw else clipper_summary_pdf_path(job_id, str(manifest.get("video_file") or "video"))
+    try:
+        summary_pdf_path.relative_to(clipper_summary_pdf_dir(job_id).resolve())
+    except ValueError:
+        summary_pdf_path = clipper_summary_pdf_path(job_id, str(manifest.get("video_file") or "video"))
+    if summary_pdf_path.exists():
+        summary_pdf_filename = summary_pdf_path.name
+        summary_pdf_exists = True
+
     subtitle_filename = str(manifest.get("subtitle_file") or "").strip()
     fullsubs_translation_targets = [
         {
@@ -1374,6 +1453,8 @@ def clipper_job(job_id):
         clips_by_segment=clips_by_segment,
         transcript_pdf_exists=transcript_pdf_exists,
         transcript_pdf_filename=transcript_pdf_filename,
+        summary_pdf_exists=summary_pdf_exists,
+        summary_pdf_filename=summary_pdf_filename,
         fullsubs_translation_targets=fullsubs_translation_targets,
     )
 
@@ -1482,6 +1563,27 @@ def clipper_download_transcript(job_id):
         transcript_path.name,
         as_attachment=True,
         download_name=transcript_path.name,
+    )
+
+
+@yt_bp.route('/yt/clipper/job/<job_id>/download-summary-pdf', methods=['GET'])
+def clipper_download_summary_pdf(job_id):
+    manifest = load_clipper_job(job_id)
+    if not manifest:
+        flash("Clipper job not found.", "danger")
+        return redirect(url_for('yt.clipper'))
+
+    expected_name = clipper_summary_pdf_filename(str(manifest.get("video_file") or "video"))
+    summary_pdf_path = resolve_clipper_summary_pdf_file(job_id, expected_name)
+    if not summary_pdf_path:
+        flash("Summary PDF not found for this job.", "danger")
+        return redirect(url_for('yt.clipper_job', job_id=job_id))
+
+    return send_from_directory(
+        summary_pdf_path.parent,
+        summary_pdf_path.name,
+        as_attachment=True,
+        download_name=summary_pdf_path.name,
     )
 
 

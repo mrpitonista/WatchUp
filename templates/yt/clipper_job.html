@@ -38,6 +38,10 @@
           <button class="button" type="submit">Generate transcript PDF</button>
         </form>
       {% endif %}
+      {% if summary_pdf_exists %}
+        <br>
+        <a href="{{ url_for('yt.clipper_download_summary_pdf', job_id=manifest.job_id) }}">Download summary PDF</a>
+      {% endif %}
       <br>
       <strong>Translated subtitles (full video)</strong>
       <form method="post" action="{{ url_for('yt.clipper_translate_full_subs', job_id=manifest.job_id) }}" style="display:inline; margin-left: 6px;">
