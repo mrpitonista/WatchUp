@@ -32,6 +32,7 @@ from clipper_utils import (
     ms_to_timestamp,
     merge_overlapping_cues,
     mux_mkv_ffmpeg,
+    burn_subtitles_into_mp4,
     parse_srt,
     parse_timestamp_to_ms,
     parse_vtt,
@@ -1719,6 +1720,10 @@ def clipper_clip(job_id):
     output_path = MEDIA_CLIPS_DIR / output_filename
     clip_basename = output_path.stem
     mux_mkv_requested = (request.form.get("mux_mkv") or "").strip() == "1"
+    burn_in_requested = (request.form.get("burn_in") or "").strip() == "1"
+    burn_subs_choice = (request.form.get("burn_subs_choice") or "original").strip().lower()
+    if burn_subs_choice not in {"original", "translated"}:
+        burn_subs_choice = "original"
     subtitle_translate_target = (request.form.get("subtitle_translate_target") or "").strip().lower()
     if subtitle_translate_target not in {"", "en", "it"}:
         subtitle_translate_target = ""
@@ -1872,6 +1877,39 @@ def clipper_clip(job_id):
             mkv_out_path,
         )
 
+    burned_mp4_filename: str | None = None
+    burned_mp4_subtitle_choice: str | None = None
+    if burn_in_requested and subtitle_filename:
+        subs_for_burn = subtitle_out_path
+        if burn_subs_choice == "translated":
+            if translated_subtitle_path and translated_subtitle_path.exists():
+                subs_for_burn = translated_subtitle_path
+            else:
+                logger.info(
+                    "[CLIPPER] burn-in translated subtitles unavailable job_id=%s segment_idx=%s; fallback=original",
+                    job_id,
+                    segment_index + 1,
+                )
+                flash("Translated clip subtitles unavailable; burned MP4 used original subtitles.", "warning")
+
+        burn_choice_used = "translated" if subs_for_burn == translated_subtitle_path else "original"
+        burned_mp4_path = MEDIA_CLIPS_DIR / f"{clip_basename}__burned_{burn_choice_used}.mp4"
+        logger.info(
+            "[CLIPPER] burn-in requested job_id=%s segment_idx=%s choice=%s subs=%s",
+            job_id,
+            segment_index + 1,
+            burn_subs_choice,
+            subs_for_burn,
+        )
+        burn_ok, burn_err = burn_subtitles_into_mp4(output_path, subs_for_burn, burned_mp4_path)
+        if burn_ok:
+            burned_mp4_filename = burned_mp4_path.name
+            burned_mp4_subtitle_choice = burn_choice_used
+            logger.info("[CLIPPER] burn-in OK -> %s", burned_mp4_path)
+        else:
+            logger.error("[CLIPPER] burn-in FAILED stderr=%s", burn_err)
+            flash("Clip created, but burned-in MP4 generation failed.", "warning")
+
     clip_entry = {
         "segment_index": segment_index,
         "start": start,
@@ -1886,6 +1924,8 @@ def clipper_clip(job_id):
         "translated_subtitle_target": translated_subtitle_target,
         "mkv_filename": mkv_filename,
         "mkv_subtitle_filename": mkv_subtitle_filename,
+        "burned_mp4_filename": burned_mp4_filename,
+        "burned_mp4_subtitle_choice": burned_mp4_subtitle_choice,
         "created_at": datetime.now().isoformat(),
     }
     manifest.setdefault("clips", []).append(clip_entry)

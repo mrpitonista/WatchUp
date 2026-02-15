@@ -1048,6 +1048,43 @@ def _dev_sanity_check_overlap_merge() -> None:
 if __name__ == "__main__":
     _dev_sanity_check_overlap_merge()
 
+def _ffmpeg_subtitles_filter_arg(subs_in: Path) -> str:
+    # Escape for ffmpeg filter parser: https://ffmpeg.org/ffmpeg-filters.html#Notes-on-filtergraph-escaping
+    path_str = str(subs_in.resolve())
+    path_str = path_str.replace("\\", "\\\\")
+    path_str = path_str.replace(":", "\\:")
+    path_str = path_str.replace("'", "\\\\'")
+    return f"subtitles='{path_str}'"
+
+
+def burn_subtitles_into_mp4(video_in: Path, subs_in: Path, video_out: Path) -> tuple[bool, str]:
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_in),
+        "-vf",
+        _ffmpeg_subtitles_filter_arg(subs_in),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "24",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(video_out),
+    ]
+    run = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if run.returncode == 0:
+        return True, run.stderr.strip()
+    return False, run.stderr.strip() or "ffmpeg burn-in failed."
+
+
 def mux_mkv_ffmpeg(clip_mp4_path: Path, srt_path: Path, out_mkv_path: Path) -> tuple[bool, str]:
     first_cmd = [
         "ffmpeg",
