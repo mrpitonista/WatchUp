@@ -104,6 +104,17 @@
                       <input type="checkbox" name="mux_mkv" value="1">
                       Also create MKV with subtitles
                     </label>
+                    <label class="meta-text">
+                      <input type="checkbox" name="burn_in" value="1">
+                      Burn subtitles into MP4
+                    </label>
+                    <label class="meta-text">
+                      Subtitles to burn
+                      <select name="burn_subs_choice">
+                        <option value="original" selected>Original subtitles</option>
+                        <option value="translated">Translated subtitles (if available)</option>
+                      </select>
+                    </label>
                     <button class="button button--primary" type="submit">Create clip</button>
                   </form>
                   {% if clips_by_segment.get(loop.index0) %}
@@ -146,6 +157,12 @@
                               {% else %}
                                 <span class="meta-text">MKV subtitles: original</span>
                               {% endif %}
+                            {% endif %}
+                            {% if clip.burned_mp4_filename %}
+                              <br>
+                              <a href="{{ url_for('yt.clipper_download', filename=clip.burned_mp4_filename) }}">Download burned MP4</a>
+                              <br>
+                              <span class="meta-text">Burned subtitles: {{ clip.burned_mp4_subtitle_choice or 'original' }}</span>
                             {% endif %}
                           </li>
                         {% endfor %}
