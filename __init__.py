@@ -2565,20 +2565,33 @@ def resolve_transcriber_audio_file(selected_rel_path: str, root_dir: Path) -> Pa
 def transcribe_audio(audio_path: Path, model: str) -> dict:
     client = get_openai_client()
     with audio_path.open("rb") as fh:
+        response = None
         try:
             response = client.audio.transcriptions.create(
                 model=model,
                 file=fh,
-                response_format="verbose_json",
+                response_format="json",
             )
         except TypeError:
             fh.seek(0)
             response = client.audio.transcriptions.create(model=model, file=fh)
+        except Exception as exc:
+            err = str(exc).lower()
+            if "response_format" not in err:
+                raise
+            fh.seek(0)
+            response = client.audio.transcriptions.create(
+                model=model,
+                file=fh,
+                response_format="text",
+            )
 
-    data = response.model_dump() if hasattr(response, "model_dump") else {}
+    data = response.model_dump() if hasattr(response, "model_dump") else response if isinstance(response, dict) else {}
     text = str(data.get("text") or "").strip() if isinstance(data, dict) else ""
     if not text:
         text = str(getattr(response, "text", "") or "").strip()
+    if not text and isinstance(response, str):
+        text = response.strip()
     language = ""
     if isinstance(data, dict):
         language = str(data.get("language") or "").strip().lower()
@@ -2587,7 +2600,7 @@ def transcribe_audio(audio_path: Path, model: str) -> dict:
     return {
         "text": text,
         "language": language or None,
-        "verbose": data if isinstance(data, dict) and data else None,
+        "raw": data if isinstance(data, dict) and data else None,
     }
 
 
@@ -2764,9 +2777,9 @@ def transcriber_start():
         manifest["transcript_original_path"] = str(original_path)
         manifest["detected_language"] = str(transcript.get("language") or "")
 
-        verbose = transcript.get("verbose")
-        if verbose:
-            (job_dir / "transcript_verbose.json").write_text(json.dumps(verbose, indent=2))
+        raw_transcript = transcript.get("raw")
+        if raw_transcript:
+            (job_dir / "transcript_raw.json").write_text(json.dumps(raw_transcript, indent=2))
 
         if translate_enabled:
             translated_text, translation_status = translate_transcript_text(
