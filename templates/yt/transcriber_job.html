@@ -44,7 +44,7 @@
         <a class="button button--ghost" href="{{ url_for('yt.transcriber_download', job_id=manifest.job_id, kind='transcript_translated') }}">Download translated transcript</a>
       {% endif %}
       {% if manifest.summary_path %}
-        <a class="button button--ghost" href="{{ url_for('yt.transcriber_download', job_id=manifest.job_id, kind='summary') }}">Download summary</a>
+        <a class="button button--ghost" href="{{ url_for('yt.transcriber_download', job_id=manifest.job_id, kind='summary') }}">Download summary PDF</a>
       {% endif %}
       {% if manifest.prompt_used_path %}
         <a class="button button--ghost" href="{{ url_for('yt.transcriber_download', job_id=manifest.job_id, kind='prompt_used') }}">Download prompt snapshot</a>
@@ -67,9 +67,9 @@
 
       <label>Transcript source:</label>
       <select name="summary_source">
-        <option value="original" selected>Original transcript</option>
+        <option value="original" {% if (manifest.summary_source or "original") == "original" %}selected{% endif %}>Original transcript</option>
         {% if manifest.transcript_translated_path %}
-          <option value="translated">Translated transcript</option>
+          <option value="translated" {% if manifest.summary_source == "translated" %}selected{% endif %}>Translated transcript</option>
         {% endif %}
       </select>
 

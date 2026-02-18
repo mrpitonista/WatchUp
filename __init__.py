@@ -23,6 +23,7 @@ from clipper_utils import (
     detect_language_text,
     find_verdana_ttf,
     generate_summary_pdf,
+    generate_transcriber_summary_pdf,
     generate_transcript_pdf,
     find_matching_video,
     full_video_translate_subtitles,
@@ -2760,6 +2761,7 @@ def transcriber_start():
         "transcript_original_path": "",
         "transcript_translated_path": "",
         "summary_path": "",
+        "summary_text_path": "",
         "prompt_used_path": "",
         "status": "running",
         "error": "",
@@ -2813,11 +2815,17 @@ def transcriber_job(job_id):
 
     default_prompt = ensure_transcriber_default_prompt()
     summary_text = ""
-    summary_path = manifest.get("summary_path")
-    if isinstance(summary_path, str) and summary_path:
-        path = Path(summary_path)
+    summary_text_path = manifest.get("summary_text_path")
+    if isinstance(summary_text_path, str) and summary_text_path:
+        path = Path(summary_text_path)
         if path.exists():
             summary_text = path.read_text()
+    if not summary_text:
+        summary_path = manifest.get("summary_path")
+        if isinstance(summary_path, str) and summary_path and Path(summary_path).suffix.lower() == ".txt":
+            path = Path(summary_path)
+            if path.exists():
+                summary_text = path.read_text()
 
     return render_template(
         'yt/transcriber_job.html',
@@ -2886,14 +2894,30 @@ def transcriber_summarise(job_id):
             raise ValueError("Empty summary response from OpenAI.")
 
         job_dir = transcriber_job_dir(job_id)
-        summary_path = job_dir / "summary.txt"
+        summary_text_path = job_dir / "summary.txt"
+        summary_pdf_path = job_dir / "summary.pdf"
         prompt_used_path = job_dir / "prompt_used.txt"
-        summary_path.write_text(summary_text)
+        summary_text_path.write_text(summary_text)
         prompt_used_path.write_text(prompt_text)
+
+        pdf_title = str(manifest.get("audio_title") or manifest.get("audio_filename") or "Summary")
+        transcriber_meta = {
+            "title": pdf_title,
+            "job_id": str(manifest.get("job_id") or job_id),
+            "audio_file": str(manifest.get("audio_filename") or "Unknown"),
+            "duration": str(manifest.get("audio_duration_hhmmss") or "Unknown"),
+            "language": str(manifest.get("detected_language") or "Unknown"),
+            "transcription_model": str(manifest.get("transcription_model") or "Unknown"),
+            "summary_source": "Translated transcript" if transcript_source == "translated" else "Original transcript",
+            "summary_model": model,
+            "created_at": str(manifest.get("created_at") or "Unknown"),
+        }
+        generate_transcriber_summary_pdf(transcriber_meta, summary_text, summary_pdf_path)
 
         manifest["summary_model"] = model
         manifest["summary_source"] = transcript_source
-        manifest["summary_path"] = str(summary_path)
+        manifest["summary_path"] = str(summary_pdf_path)
+        manifest["summary_text_path"] = str(summary_text_path)
         manifest["prompt_used_path"] = str(prompt_used_path)
         write_transcriber_job(job_id, manifest)
         flash("Summarisation completed.", "success")

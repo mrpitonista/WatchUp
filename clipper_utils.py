@@ -669,6 +669,128 @@ def generate_summary_pdf(job_meta: dict, summary: dict, out_path: Path) -> None:
     doc.build(story, onFirstPage=_draw_page_number, onLaterPages=_draw_page_number)
 
 
+def generate_transcriber_summary_pdf(job_meta: dict, summary_text: str, out_path: Path) -> None:
+    verdana_path = find_verdana_ttf()
+    base_font = "Helvetica"
+    bold_font = "Helvetica-Bold"
+    if verdana_path:
+        pdfmetrics.registerFont(TTFont("Verdana", str(verdana_path)))
+        pdfmetrics.registerFont(TTFont("Verdana-Bold", str(verdana_path)))
+        base_font = "Verdana"
+        bold_font = "Verdana-Bold"
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    doc = SimpleDocTemplate(
+        str(out_path),
+        pagesize=LETTER,
+        leftMargin=0.7 * inch,
+        rightMargin=0.7 * inch,
+        topMargin=0.7 * inch,
+        bottomMargin=0.7 * inch,
+        title=str(job_meta.get("title") or "Summary"),
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "TranscriberSummaryTitle",
+        parent=styles["Title"],
+        fontName=bold_font,
+        fontSize=20,
+        leading=25,
+        textColor=colors.HexColor("#111827"),
+        spaceAfter=8,
+    )
+    meta_style = ParagraphStyle(
+        "TranscriberSummaryMeta",
+        parent=styles["Normal"],
+        fontName=base_font,
+        fontSize=10,
+        leading=13,
+        textColor=colors.HexColor("#374151"),
+    )
+    section_style = ParagraphStyle(
+        "TranscriberSummarySection",
+        parent=styles["Normal"],
+        fontName=bold_font,
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor("#111827"),
+    )
+    summary_style = ParagraphStyle(
+        "TranscriberSummaryBody",
+        parent=styles["Normal"],
+        fontName=base_font,
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor("#111827"),
+    )
+
+    meta_rows = [
+        ("Job ID", str(job_meta.get("job_id") or "Unknown")),
+        ("Audio file", str(job_meta.get("audio_file") or "Unknown")),
+        ("Duration", str(job_meta.get("duration") or "Unknown")),
+        ("Detected language", str(job_meta.get("language") or "Unknown")),
+        ("Transcription model", str(job_meta.get("transcription_model") or "Unknown")),
+        ("Summary source", str(job_meta.get("summary_source") or "Unknown")),
+        ("Summary model", str(job_meta.get("summary_model") or "Unknown")),
+        ("Created", str(job_meta.get("created_at") or "Unknown")),
+    ]
+
+    title = html.escape(str(job_meta.get("title") or "Summary").strip() or "Summary")
+    story: list = [Paragraph(title, title_style), Spacer(1, 4)]
+    for label, value in meta_rows:
+        story.append(Paragraph(f"<b>{html.escape(label)}:</b> {html.escape(value)}", meta_style))
+    story.append(Spacer(1, 12))
+
+    paragraphs = [p.strip() for p in summary_text.split("\n\n") if p.strip()]
+    table_data: list[list[Paragraph]] = [
+        [Paragraph("Section", section_style), Paragraph("Summary", section_style)]
+    ]
+    for idx, paragraph in enumerate(paragraphs, start=1):
+        cleaned = html.escape(paragraph).replace("\n", "<br/>")
+        table_data.append(
+            [
+                Paragraph(f"Section {idx}", summary_style),
+                Paragraph(cleaned, summary_style),
+            ]
+        )
+
+    if len(table_data) == 1:
+        table_data.append([Paragraph("Section 1", summary_style), Paragraph("(empty)", summary_style)])
+
+    usable_width = LETTER[0] - doc.leftMargin - doc.rightMargin
+    summary_table = Table(
+        table_data,
+        colWidths=[usable_width * 0.2, usable_width * 0.8],
+        repeatRows=1,
+    )
+    summary_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f3f4f6")),
+                ("LINEBELOW", (0, 0), (-1, 0), 1, colors.HexColor("#d1d5db")),
+                ("LINEBELOW", (0, 1), (-1, -1), 0.5, colors.HexColor("#e5e7eb")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+            ]
+        )
+    )
+    story.append(summary_table)
+
+    def _draw_page_number(canvas, _doc):
+        canvas.saveState()
+        canvas.setFont(base_font, 9)
+        canvas.setFillColor(colors.HexColor("#6b7280"))
+        canvas.drawRightString(LETTER[0] - doc.rightMargin, 0.45 * inch, f"Page {canvas.getPageNumber()}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=_draw_page_number, onLaterPages=_draw_page_number)
+
+
 def parse_srt(path: Path) -> list[SubtitleCue]:
     content = path.read_text(encoding="utf-8", errors="ignore")
     blocks = re.split(r"\n\s*\n", content.strip())
