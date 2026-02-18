@@ -359,7 +359,7 @@ td {
     background: var(--card);
     border-top: 1px solid var(--border);
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(6, 1fr);
     gap: 4px;
     padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
     z-index: 20;
@@ -395,4 +395,14 @@ td {
         grid-template-columns: 1fr auto;
         align-items: center;
     }
+}
+
+
+.summary-box {
+    background: #f8fafc;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }

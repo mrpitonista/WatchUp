@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+
+{% block title %}Audio Transcriber · WatchUp{% endblock %}
+
+{% block content %}
+  <section class="page-hero">
+    <h1>Audio Transcriber</h1>
+    <p class="page-subtitle">Transcribe, translate and summarise audio files.</p>
+  </section>
+
+  <a class="text-link" href="{{ url_for('yt.home') }}">⬅ Back to Home</a>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flash-list">
+        {% for category, message in messages %}
+          <p class="flash flash-{{ category }}">{{ message }}</p>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <section class="card">
+    <h2>Start transcription</h2>
+    {% if audio_files %}
+      <form method="post" action="{{ url_for('yt.transcriber_start') }}">
+        <label>Audio file:</label>
+        <select name="audio_file" required>
+          {% for audio_file in audio_files %}
+            <option value="{{ audio_file }}">{{ audio_file }}</option>
+          {% endfor %}
+        </select>
+
+        <label>Transcription model:</label>
+        <select name="transcription_model">
+          <option value="gpt-4o-mini-transcribe" selected>gpt-4o-mini-transcribe</option>
+          <option value="gpt-4o-transcribe">gpt-4o-transcribe</option>
+        </select>
+
+        <label class="checkbox-row">
+          <input type="checkbox" name="translate_transcript" value="1" checked>
+          Translate transcript
+        </label>
+
+        <label>Translation target:</label>
+        <select name="translation_target">
+          <option value="en" selected>EN</option>
+          <option value="it">IT</option>
+        </select>
+
+        <button class="button button--primary" type="submit">Start Transcription</button>
+      </form>
+    {% else %}
+      <p class="meta-text">No audio files found under the configured media root.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Previous jobs</h2>
+    {% if previous_jobs %}
+      <ul class="list-stack">
+        {% for job in previous_jobs %}
+          <li>
+            <a class="history-title" href="{{ url_for('yt.transcriber_job', job_id=job.job_id) }}">{{ job.title }}</a>
+            <div class="history-meta">
+              <div>Job ID: <span class="mono">{{ job.job_id }}</span></div>
+              <div>Audio: {{ job.audio_filename }}</div>
+              <div>Duration: {{ job.duration }}</div>
+              <div>Transcription model: {{ job.transcription_model }}</div>
+              <div>Translation target: {% if job.translation_enabled %}{{ job.translation_target or 'N/A' }}{% else %}None{% endif %}</div>
+              <div>Status: {{ job.status }}</div>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="meta-text">No previous jobs yet.</p>
+    {% endif %}
+  </section>
+{% endblock %}
