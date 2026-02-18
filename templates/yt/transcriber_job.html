@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+
+{% block title %}Transcriber Job · WatchUp{% endblock %}
+
+{% block content %}
+  <section class="page-hero">
+    <h1>Transcriber Job</h1>
+    <p class="page-subtitle">Review transcript artifacts and run summarisation.</p>
+  </section>
+
+  <a class="text-link" href="{{ url_for('yt.transcriber') }}">⬅ Back to Audio Transcriber</a>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flash-list">
+        {% for category, message in messages %}
+          <p class="flash flash-{{ category }}">{{ message }}</p>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <section class="card">
+    <h2>{{ manifest.audio_title or manifest.audio_filename }}</h2>
+    <p class="meta-text">
+      Job ID: {{ manifest.job_id }}<br>
+      Audio file: {{ manifest.audio_filename }}<br>
+      Duration: {{ manifest.audio_duration_hhmmss or '00:00:00' }}<br>
+      Detected language: {{ manifest.detected_language or 'Unknown' }}<br>
+      Transcription model: {{ manifest.transcription_model }}<br>
+      Translation target: {% if manifest.translation_enabled %}{{ manifest.translation_target or 'N/A' }}{% else %}None{% endif %}<br>
+      Created: {{ manifest.created_at }}<br>
+      Status: {{ manifest.status }}
+      {% if manifest.error %}
+        <br>Error: {{ manifest.error }}
+      {% endif %}
+    </p>
+    <div class="button-row">
+      <a class="button button--ghost" href="{{ url_for('yt.transcriber_download', job_id=manifest.job_id, kind='manifest') }}">Download manifest</a>
+      {% if manifest.transcript_original_path %}
+        <a class="button button--ghost" href="{{ url_for('yt.transcriber_download', job_id=manifest.job_id, kind='transcript_original') }}">Download original transcript</a>
+      {% endif %}
+      {% if manifest.transcript_translated_path %}
+        <a class="button button--ghost" href="{{ url_for('yt.transcriber_download', job_id=manifest.job_id, kind='transcript_translated') }}">Download translated transcript</a>
+      {% endif %}
+      {% if manifest.summary_path %}
+        <a class="button button--ghost" href="{{ url_for('yt.transcriber_download', job_id=manifest.job_id, kind='summary') }}">Download summary</a>
+      {% endif %}
+      {% if manifest.prompt_used_path %}
+        <a class="button button--ghost" href="{{ url_for('yt.transcriber_download', job_id=manifest.job_id, kind='prompt_used') }}">Download prompt snapshot</a>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Summarisation</h2>
+    <form method="post" action="{{ url_for('yt.transcriber_summarise', job_id=manifest.job_id) }}">
+      <label>Summarisation prompt:</label>
+      <textarea name="summary_prompt" required>{{ default_prompt }}</textarea>
+
+      <label>Summary model:</label>
+      <select name="summary_model">
+        {% for model in summary_models %}
+          <option value="{{ model }}" {% if model == (manifest.summary_model or 'gpt-4o-mini') %}selected{% endif %}>{{ model }}</option>
+        {% endfor %}
+      </select>
+
+      <label>Transcript source:</label>
+      <select name="summary_source">
+        <option value="original" selected>Original transcript</option>
+        {% if manifest.transcript_translated_path %}
+          <option value="translated">Translated transcript</option>
+        {% endif %}
+      </select>
+
+      <button class="button button--primary" type="submit">Run summarisation</button>
+    </form>
+
+    <form method="post" action="{{ url_for('yt.transcriber_save_prompt_default') }}">
+      <input type="hidden" name="job_id" value="{{ manifest.job_id }}">
+      <label>Save current prompt as default:</label>
+      <textarea name="summary_prompt" required>{{ default_prompt }}</textarea>
+      <button class="button button--ghost" type="submit">Save as default</button>
+    </form>
+
+    {% if summary_text %}
+      <h3>Summary output</h3>
+      <pre class="summary-box">{{ summary_text }}</pre>
+    {% endif %}
+  </section>
+{% endblock %}

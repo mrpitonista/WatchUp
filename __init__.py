@@ -70,6 +70,13 @@ CLIPPER_SUMMARY_PDFS_DIR = CLIPPER_ROOT / "summary_pdfs"
 CLIPPER_TRANSLATIONS_DIR = CLIPPER_ROOT / "translations"
 CLIPPER_PREVIOUS_JOBS_LIMIT = 15
 CLIPPER_TRANSLATE_CREDS_PATH = this_dir / "Google_translate_api-463712-b435ed9c8fa8.json"
+TRANSCRIBER_ROOT = this_dir / "transcriber_files"
+TRANSCRIBER_JOBS_DIR = TRANSCRIBER_ROOT / "jobs"
+TRANSCRIBER_PROMPTS_DIR = TRANSCRIBER_ROOT / "prompts"
+TRANSCRIBER_DEFAULT_PROMPT_PATH = TRANSCRIBER_PROMPTS_DIR / "summarisation_default.txt"
+TRANSCRIBER_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".aac", ".flac"}
+TRANSCRIBER_PREVIOUS_JOBS_LIMIT = 15
+TRANSCRIBER_SUMMARY_MODELS = {"gpt-4o-mini", "gpt-5-mini", "gpt-5.2"}
 
 PODCAST_ROOT.mkdir(exist_ok=True)
 PODCAST_UPLOAD_DIR.mkdir(exist_ok=True)
@@ -87,6 +94,9 @@ CLIPPER_SUMMARY_PDFS_DIR.mkdir(exist_ok=True)
 CLIPPER_TRANSLATIONS_DIR.mkdir(exist_ok=True)
 MEDIA_CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 PROGRESS_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+TRANSCRIBER_ROOT.mkdir(exist_ok=True)
+TRANSCRIBER_JOBS_DIR.mkdir(parents=True, exist_ok=True)
+TRANSCRIBER_PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
 
 ENV_FILE = "openai_api_key.env"
 SCRIPT_MODEL = "gpt-4o-mini"
@@ -2451,3 +2461,446 @@ def magnet_download():
         flash(f"Magnet download error: {e}", 'danger')
 
     return redirect(url_for('yt.magnet_download'))
+
+TRANSCRIBER_DEFAULT_PROMPT_TEXT = (
+    "You are an expert editorial assistant. Summarise the transcript clearly and concisely.\n"
+    "- Keep factual accuracy.\n"
+    "- Provide key takeaways as bullet points.\n"
+    "- Highlight actions, decisions, and open questions."
+)
+
+
+def ensure_transcriber_default_prompt() -> str:
+    if not TRANSCRIBER_DEFAULT_PROMPT_PATH.exists():
+        TRANSCRIBER_DEFAULT_PROMPT_PATH.write_text(TRANSCRIBER_DEFAULT_PROMPT_TEXT)
+    return TRANSCRIBER_DEFAULT_PROMPT_PATH.read_text().strip() or TRANSCRIBER_DEFAULT_PROMPT_TEXT
+
+
+def media_root_dir() -> Path:
+    return Path(DOWNLOAD_FOLDERS.get("Music") or DOWNLOAD_FOLDERS.get("Videos") or str(MEDIA_OTHER_DIR))
+
+
+def transcriber_job_dir(job_id: str) -> Path:
+    return TRANSCRIBER_JOBS_DIR / job_id
+
+
+def transcriber_manifest_path(job_id: str) -> Path:
+    return transcriber_job_dir(job_id) / "manifest.json"
+
+
+def load_transcriber_job(job_id: str) -> dict | None:
+    path = transcriber_manifest_path(job_id)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+        return payload if isinstance(payload, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+def write_transcriber_job(job_id: str, payload: dict) -> None:
+    job_dir = transcriber_job_dir(job_id)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    transcriber_manifest_path(job_id).write_text(json.dumps(payload, indent=2))
+
+
+def format_hhmmss(total_seconds: float | int) -> str:
+    seconds = max(0, int(round(float(total_seconds))))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def probe_media_duration_seconds(media_path: Path) -> float:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(media_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return max(0.0, float(result.stdout.strip()))
+    except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
+        return 0.0
+
+
+def list_transcriber_audio_files(root_dir: Path) -> list[str]:
+    if not root_dir.exists():
+        return []
+    root_resolved = root_dir.resolve()
+    files: list[str] = []
+    for item in root_resolved.rglob("*"):
+        if not item.is_file() or item.suffix.lower() not in TRANSCRIBER_AUDIO_EXTENSIONS:
+            continue
+        try:
+            files.append(str(item.resolve().relative_to(root_resolved)))
+        except ValueError:
+            continue
+    return sorted(files)
+
+
+def resolve_transcriber_audio_file(selected_rel_path: str, root_dir: Path) -> Path | None:
+    if not selected_rel_path:
+        return None
+    candidate = (root_dir / selected_rel_path).resolve()
+    try:
+        candidate.relative_to(root_dir.resolve())
+    except ValueError:
+        return None
+    if not candidate.exists() or not candidate.is_file() or candidate.suffix.lower() not in TRANSCRIBER_AUDIO_EXTENSIONS:
+        return None
+    return candidate
+
+
+def transcribe_audio(audio_path: Path, model: str) -> dict:
+    client = get_openai_client()
+    with audio_path.open("rb") as fh:
+        try:
+            response = client.audio.transcriptions.create(
+                model=model,
+                file=fh,
+                response_format="verbose_json",
+            )
+        except TypeError:
+            fh.seek(0)
+            response = client.audio.transcriptions.create(model=model, file=fh)
+
+    data = response.model_dump() if hasattr(response, "model_dump") else {}
+    text = str(data.get("text") or "").strip() if isinstance(data, dict) else ""
+    if not text:
+        text = str(getattr(response, "text", "") or "").strip()
+    language = ""
+    if isinstance(data, dict):
+        language = str(data.get("language") or "").strip().lower()
+    if not language:
+        language = str(getattr(response, "language", "") or "").strip().lower()
+    return {
+        "text": text,
+        "language": language or None,
+        "verbose": data if isinstance(data, dict) and data else None,
+    }
+
+
+def split_paragraph_batches(text: str, max_chars: int = 2000) -> list[str]:
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    if not paragraphs:
+        return []
+    batches: list[str] = []
+    current = ""
+    for paragraph in paragraphs:
+        candidate = f"{current}\n\n{paragraph}".strip() if current else paragraph
+        if current and len(candidate) > max_chars:
+            batches.append(current)
+            current = paragraph
+        else:
+            current = candidate
+    if current:
+        batches.append(current)
+    return batches
+
+
+def translate_transcript_text(text: str, target: str, detected_language: str | None) -> tuple[str | None, str]:
+    if not text.strip():
+        return None, "skipped_empty"
+    source = (detected_language or "").lower()
+    if source in {"en", "it"} and source == target:
+        return None, "skipped_same_language"
+
+    if not CLIPPER_TRANSLATE_CREDS_PATH.exists():
+        raise FileNotFoundError("Google Translate credentials file is missing.")
+
+    client = get_google_translate_client(CLIPPER_TRANSLATE_CREDS_PATH)
+    batches = split_paragraph_batches(text, max_chars=2200)
+    translated_batches: list[str] = []
+    for batch in batches:
+        response = client.translate(batch, target_language=target, format_="text")
+        if isinstance(response, list):
+            translated = "\n".join(str(item.get("translatedText") or "") for item in response)
+        else:
+            translated = str(response.get("translatedText") or "")
+        translated_batches.append(translated.replace("<br>", "\n"))
+    return "\n\n".join(translated_batches).strip(), "translated"
+
+
+def list_transcriber_jobs(limit: int = TRANSCRIBER_PREVIOUS_JOBS_LIMIT) -> list[dict]:
+    jobs: list[dict] = []
+    if not TRANSCRIBER_JOBS_DIR.exists():
+        return jobs
+    for path in TRANSCRIBER_JOBS_DIR.glob("*/manifest.json"):
+        try:
+            manifest = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(manifest, dict):
+            continue
+        created_at = str(manifest.get("created_at") or "")
+        sort_value = path.stat().st_mtime
+        if created_at:
+            try:
+                sort_value = datetime.fromisoformat(created_at).timestamp()
+            except ValueError:
+                pass
+        jobs.append(
+            {
+                "job_id": str(manifest.get("job_id") or path.parent.name),
+                "title": str(manifest.get("audio_title") or Path(str(manifest.get("audio_filename") or "audio")).stem),
+                "audio_filename": str(manifest.get("audio_filename") or "Unknown"),
+                "duration": str(manifest.get("audio_duration_hhmmss") or "00:00:00"),
+                "transcription_model": str(manifest.get("transcription_model") or "Unknown"),
+                "translation_target": str(manifest.get("translation_target") or ""),
+                "translation_enabled": bool(manifest.get("translation_enabled", False)),
+                "status": str(manifest.get("status") or "unknown"),
+                "created_at": created_at,
+                "_sort": sort_value,
+            }
+        )
+    jobs.sort(key=lambda item: item.get("_sort", 0), reverse=True)
+    return jobs[:limit]
+
+
+def resolve_transcriber_download(job_id: str, kind: str) -> Path | None:
+    manifest = load_transcriber_job(job_id)
+    if not manifest:
+        return None
+    artifacts = {
+        "transcript_original": manifest.get("transcript_original_path"),
+        "transcript_translated": manifest.get("transcript_translated_path"),
+        "summary": manifest.get("summary_path"),
+        "manifest": transcriber_manifest_path(job_id),
+        "prompt_used": manifest.get("prompt_used_path"),
+    }
+    raw_path = artifacts.get(kind)
+    if not raw_path:
+        return None
+    path = Path(raw_path).resolve() if isinstance(raw_path, str) else Path(raw_path).resolve()
+    job_dir = transcriber_job_dir(job_id).resolve()
+    try:
+        path.relative_to(job_dir)
+    except ValueError:
+        return None
+    if not path.exists() or not path.is_file():
+        return None
+    return path
+
+
+@yt_bp.route('/yt/transcriber', methods=['GET'])
+def transcriber():
+    root_dir = media_root_dir()
+    audio_files = list_transcriber_audio_files(root_dir)
+    previous_jobs = list_transcriber_jobs()
+    return render_template(
+        'yt/transcriber.html',
+        active_page="transcriber",
+        audio_files=audio_files,
+        previous_jobs=previous_jobs,
+    )
+
+
+@yt_bp.route('/yt/transcriber', methods=['POST'])
+def transcriber_start():
+    selected_audio = (request.form.get("audio_file") or "").strip()
+    model = (request.form.get("transcription_model") or "gpt-4o-mini-transcribe").strip()
+    if model not in {"gpt-4o-mini-transcribe", "gpt-4o-transcribe"}:
+        model = "gpt-4o-mini-transcribe"
+
+    translate_enabled = request.form.get("translate_transcript") == "1"
+    translation_target = (request.form.get("translation_target") or "en").strip().lower()
+    if translation_target not in {"en", "it"}:
+        translation_target = "en"
+
+    root_dir = media_root_dir()
+    audio_path = resolve_transcriber_audio_file(selected_audio, root_dir)
+    if not audio_path:
+        flash("Please select a valid audio file.", "danger")
+        return redirect(url_for('yt.transcriber'))
+
+    job_id = uuid.uuid4().hex[:12]
+    job_dir = transcriber_job_dir(job_id)
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    duration_seconds = probe_media_duration_seconds(audio_path)
+    duration_hhmmss = format_hhmmss(duration_seconds)
+    created_at = datetime.now().isoformat()
+
+    manifest = {
+        "job_id": job_id,
+        "created_at": created_at,
+        "audio_source_path": str(audio_path),
+        "audio_filename": str(audio_path.relative_to(root_dir.resolve())),
+        "audio_title": audio_path.stem,
+        "audio_duration_seconds": duration_seconds,
+        "audio_duration_hhmmss": duration_hhmmss,
+        "transcription_model": model,
+        "translation_enabled": translate_enabled,
+        "translation_target": translation_target.upper() if translate_enabled else "",
+        "detected_language": "",
+        "transcript_original_path": "",
+        "transcript_translated_path": "",
+        "summary_path": "",
+        "prompt_used_path": "",
+        "status": "running",
+        "error": "",
+    }
+    write_transcriber_job(job_id, manifest)
+
+    try:
+        transcript = transcribe_audio(audio_path, model)
+        transcript_text = str(transcript.get("text") or "").strip()
+        if not transcript_text:
+            raise ValueError("Transcription returned empty text.")
+
+        original_path = job_dir / "transcript_original.txt"
+        original_path.write_text(transcript_text)
+        manifest["transcript_original_path"] = str(original_path)
+        manifest["detected_language"] = str(transcript.get("language") or "")
+
+        verbose = transcript.get("verbose")
+        if verbose:
+            (job_dir / "transcript_verbose.json").write_text(json.dumps(verbose, indent=2))
+
+        if translate_enabled:
+            translated_text, translation_status = translate_transcript_text(
+                transcript_text,
+                translation_target,
+                str(transcript.get("language") or ""),
+            )
+            if translated_text:
+                translated_path = job_dir / f"transcript_translated_{translation_target.upper()}.txt"
+                translated_path.write_text(translated_text)
+                manifest["transcript_translated_path"] = str(translated_path)
+            else:
+                manifest["translation_status"] = translation_status
+        manifest["status"] = "done"
+    except Exception as exc:
+        logger.exception("[TRANSCRIBER] job failed job_id=%s", job_id)
+        manifest["status"] = "failed"
+        manifest["error"] = str(exc)
+        flash(f"Transcription failed: {exc}", "danger")
+
+    write_transcriber_job(job_id, manifest)
+    return redirect(url_for('yt.transcriber_job', job_id=job_id))
+
+
+@yt_bp.route('/yt/transcriber/job/<job_id>', methods=['GET'])
+def transcriber_job(job_id):
+    manifest = load_transcriber_job(job_id)
+    if not manifest:
+        flash("Transcriber job not found.", "danger")
+        return redirect(url_for('yt.transcriber'))
+
+    default_prompt = ensure_transcriber_default_prompt()
+    summary_text = ""
+    summary_path = manifest.get("summary_path")
+    if isinstance(summary_path, str) and summary_path:
+        path = Path(summary_path)
+        if path.exists():
+            summary_text = path.read_text()
+
+    return render_template(
+        'yt/transcriber_job.html',
+        active_page="transcriber",
+        manifest=manifest,
+        default_prompt=default_prompt,
+        summary_text=summary_text,
+        summary_models=sorted(TRANSCRIBER_SUMMARY_MODELS),
+    )
+
+
+@yt_bp.route('/yt/transcriber/download/<job_id>/<kind>', methods=['GET'])
+def transcriber_download(job_id, kind):
+    if kind not in {"transcript_original", "transcript_translated", "summary", "manifest", "prompt_used"}:
+        abort(404)
+    file_path = resolve_transcriber_download(job_id, kind)
+    if not file_path:
+        flash("Requested artifact is not available.", "danger")
+        return redirect(url_for('yt.transcriber_job', job_id=job_id))
+    return send_from_directory(
+        file_path.parent,
+        file_path.name,
+        as_attachment=True,
+        download_name=file_path.name,
+    )
+
+
+@yt_bp.route('/yt/transcriber/job/<job_id>/summarise', methods=['POST'])
+def transcriber_summarise(job_id):
+    manifest = load_transcriber_job(job_id)
+    if not manifest:
+        flash("Transcriber job not found.", "danger")
+        return redirect(url_for('yt.transcriber'))
+
+    transcript_source = (request.form.get("summary_source") or "original").strip()
+    prompt_text = (request.form.get("summary_prompt") or "").strip() or ensure_transcriber_default_prompt()
+    model = (request.form.get("summary_model") or "gpt-4o-mini").strip()
+    if model not in TRANSCRIBER_SUMMARY_MODELS:
+        model = "gpt-4o-mini"
+
+    transcript_path = Path(str(manifest.get("transcript_original_path") or ""))
+    if transcript_source == "translated" and manifest.get("transcript_translated_path"):
+        transcript_path = Path(str(manifest.get("transcript_translated_path")))
+
+    if not transcript_path.exists():
+        flash("Transcript file not found for summarisation.", "danger")
+        return redirect(url_for('yt.transcriber_job', job_id=job_id))
+
+    transcript_text = transcript_path.read_text().strip()
+    if not transcript_text:
+        flash("Transcript is empty.", "danger")
+        return redirect(url_for('yt.transcriber_job', job_id=job_id))
+
+    user_prompt = f"{prompt_text}\n\nTRANSCRIPT:\n{transcript_text}"
+    try:
+        client = get_openai_client()
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You produce concise, actionable transcript summaries."},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        summary_text = str(response.choices[0].message.content or "").strip()
+        if not summary_text:
+            raise ValueError("Empty summary response from OpenAI.")
+
+        job_dir = transcriber_job_dir(job_id)
+        summary_path = job_dir / "summary.txt"
+        prompt_used_path = job_dir / "prompt_used.txt"
+        summary_path.write_text(summary_text)
+        prompt_used_path.write_text(prompt_text)
+
+        manifest["summary_model"] = model
+        manifest["summary_source"] = transcript_source
+        manifest["summary_path"] = str(summary_path)
+        manifest["prompt_used_path"] = str(prompt_used_path)
+        write_transcriber_job(job_id, manifest)
+        flash("Summarisation completed.", "success")
+    except Exception as exc:
+        logger.exception("[TRANSCRIBER] summary failed job_id=%s", job_id)
+        flash(f"Summarisation failed: {exc}", "danger")
+
+    return redirect(url_for('yt.transcriber_job', job_id=job_id))
+
+
+@yt_bp.route('/yt/transcriber/prompt-default', methods=['POST'])
+def transcriber_save_prompt_default():
+    prompt_text = (request.form.get("summary_prompt") or "").strip()
+    if not prompt_text:
+        flash("Prompt cannot be empty.", "danger")
+        return redirect(request.referrer or url_for('yt.transcriber'))
+    TRANSCRIBER_PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
+    TRANSCRIBER_DEFAULT_PROMPT_PATH.write_text(prompt_text)
+    flash("Default summarisation prompt updated.", "success")
+    job_id = (request.form.get("job_id") or "").strip()
+    if job_id:
+        return redirect(url_for('yt.transcriber_job', job_id=job_id))
+    return redirect(url_for('yt.transcriber'))
