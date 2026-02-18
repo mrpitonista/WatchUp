@@ -269,6 +269,20 @@ textarea {
     font-size: 0.9rem;
 }
 
+.history-url {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    white-space: normal;
+    max-width: 100%;
+    min-width: 0;
+    display: block;
+}
+
+.history-item,
+.history-meta {
+    min-width: 0;
+}
+
 .list-stack {
     display: grid;
     gap: 8px;
