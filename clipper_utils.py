@@ -421,6 +421,8 @@ def generate_transcript_pdf(
     duration_label: str,
     source_language: str,
     job_id: str,
+    source_url: str | None,
+    source_uid: str | None,
     cues: list[SubtitleCue],
     out_pdf_path: Path,
     generated_at: datetime | None = None,
@@ -497,6 +499,8 @@ def generate_transcript_pdf(
         f"<b>Duration:</b> {html.escape(duration_label)}",
         f"<b>Source language:</b> {html.escape(source_language)}",
         f"<b>Job ID:</b> {html.escape(job_id)}",
+        f"<b>Source URL:</b> {html.escape(source_url or 'Unknown')}",
+        f"<b>Source UID:</b> {html.escape(source_uid or 'Unknown')}",
         f"<b>Generated:</b> {created_at.strftime('%Y-%m-%d %H:%M:%S')}",
     ]
 
