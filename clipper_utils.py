@@ -598,6 +598,8 @@ def generate_summary_pdf(job_meta: dict, summary: dict, out_path: Path) -> None:
         ("Original language", str(job_meta.get("original_language") or "Unknown")),
         ("Sections identified", str(job_meta.get("sections_identified") or 0)),
         ("Model used", str(job_meta.get("model_used") or "Unknown")),
+        ("Source URL", str(job_meta.get("source_url") or "Unknown")),
+        ("Source UID", str(job_meta.get("source_uid") or "Unknown")),
     ]
 
     title = html.escape(str(job_meta.get("title") or "Summary").strip() or "Summary")
