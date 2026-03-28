@@ -1663,6 +1663,8 @@ def clipper_generate_transcript(job_id):
             duration_label=duration_label,
             source_language=source_language,
             job_id=job_id,
+            source_url=str(manifest.get("source_url") or "").strip() or None,
+            source_uid=str(manifest.get("source_uid") or "").strip() or None,
             cues=cues,
             out_pdf_path=transcript_pdf_path,
             verdana_path=verdana_path,
