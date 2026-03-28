@@ -1469,6 +1469,8 @@ def clipper_analyze():
         "original_language": source_language,
         "sections_identified": len([seg for seg in segments if isinstance(seg, dict)]),
         "model_used": summary_model,
+        "source_url": source_metadata["source_url"],
+        "source_uid": source_metadata["source_uid"],
     }
     try:
         generate_summary_pdf(summary_pdf_meta, summary_data, summary_pdf_path)
