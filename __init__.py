@@ -235,86 +235,69 @@ def load_download_history() -> list[dict]:
     return []
 
 
-def normalize_history_title(value: str) -> str:
-    normalized = Path((value or "").strip()).stem
-    normalized = normalized.lower()
-    normalized = re.sub(r"[—–]+", " ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized)
-    return normalized.strip()
+def watchup_sidecar_path(media_path: Path) -> Path:
+    return media_path.with_name(f"{media_path.stem}.watchup.json")
 
 
-def parse_history_timestamp(value: object) -> datetime:
-    if not isinstance(value, str) or not value.strip():
-        return datetime.min
-    try:
-        return datetime.fromisoformat(value.strip())
-    except ValueError:
-        return datetime.min
-
-
-def find_source_for_video_filename(video_filename: str) -> dict:
-    video_stem = Path(video_filename or "").stem
-    history = load_download_history()
-    if not video_stem or not history:
-        return {
-            "source_url": None,
-            "source_title": None,
-            "source_timestamp": None,
-            "source_match_method": "none",
-        }
-
-    normalized_video_stem = normalize_history_title(video_stem)
-    exact_matches: list[dict] = []
-    normalized_matches: list[dict] = []
-    contains_matches: list[dict] = []
-
-    for entry in history:
-        if not isinstance(entry, dict):
-            continue
-        history_title = str(entry.get("title") or "").strip()
-        if not history_title:
-            continue
-        normalized_history_title = normalize_history_title(history_title)
-        if history_title == video_stem:
-            exact_matches.append(entry)
-            continue
-        if normalized_video_stem and normalized_video_stem == normalized_history_title:
-            normalized_matches.append(entry)
-            continue
-        if normalized_video_stem and normalized_history_title:
-            if normalized_video_stem in normalized_history_title or normalized_history_title in normalized_video_stem:
-                contains_matches.append(entry)
-
-    match_method = "none"
-    candidates: list[dict] = []
-    if exact_matches:
-        match_method = "exact"
-        candidates = exact_matches
-    elif normalized_matches:
-        match_method = "normalized"
-        candidates = normalized_matches
-    elif contains_matches:
-        match_method = "contains"
-        candidates = contains_matches
-
-    if not candidates:
-        return {
-            "source_url": None,
-            "source_title": None,
-            "source_timestamp": None,
-            "source_match_method": "none",
-        }
-
-    best = max(candidates, key=lambda item: parse_history_timestamp(item.get("timestamp")))
-    source_url = best.get("url")
-    source_title = best.get("title")
-    source_timestamp = best.get("timestamp")
-    return {
-        "source_url": source_url if isinstance(source_url, str) and source_url.strip() else None,
-        "source_title": source_title if isinstance(source_title, str) and source_title.strip() else None,
-        "source_timestamp": source_timestamp if isinstance(source_timestamp, str) and source_timestamp.strip() else None,
-        "source_match_method": match_method,
+def write_watchup_sidecar(media_path: Path, url: str, title: str, uid: str, timestamp: str) -> Path:
+    sidecar_path = watchup_sidecar_path(media_path)
+    payload = {
+        "url": url,
+        "title": title,
+        "timestamp": timestamp,
+        "uid": uid,
+        "media_filename": media_path.name,
+        "media_path": str(media_path.resolve()),
     }
+    sidecar_path.write_text(json.dumps(payload, indent=2))
+    logger.info("[YT] wrote sidecar -> %s", sidecar_path)
+    return sidecar_path
+
+
+def load_source_metadata_from_sidecar(video_path: Path) -> dict:
+    sidecar_path = watchup_sidecar_path(video_path)
+    if not sidecar_path.exists():
+        logger.info("[CLIPPER] sidecar missing for video=%s", video_path)
+        logger.info("[CLIPPER] history fallback disabled")
+        return {
+            "source_url": None,
+            "source_title": None,
+            "source_timestamp": None,
+            "source_uid": None,
+            "source_metadata_method": "none",
+        }
+
+    try:
+        payload = json.loads(sidecar_path.read_text())
+    except Exception as exc:
+        logger.warning("[CLIPPER] sidecar invalid path=%s error=%s", sidecar_path, exc)
+        logger.info("[CLIPPER] history fallback disabled")
+        return {
+            "source_url": None,
+            "source_title": None,
+            "source_timestamp": None,
+            "source_uid": None,
+            "source_metadata_method": "none",
+        }
+
+    source_url = payload.get("url")
+    source_title = payload.get("title")
+    source_timestamp = payload.get("timestamp")
+    source_uid = payload.get("uid")
+    normalized = {
+        "source_url": source_url.strip() if isinstance(source_url, str) and source_url.strip() else None,
+        "source_title": source_title.strip() if isinstance(source_title, str) and source_title.strip() else None,
+        "source_timestamp": source_timestamp.strip() if isinstance(source_timestamp, str) and source_timestamp.strip() else None,
+        "source_uid": source_uid.strip() if isinstance(source_uid, str) and source_uid.strip() else None,
+        "source_metadata_method": "sidecar",
+    }
+    logger.info(
+        "[CLIPPER] source metadata loaded from sidecar -> url=%s uid=%s",
+        normalized["source_url"],
+        normalized["source_uid"],
+    )
+    logger.info("[CLIPPER] history fallback disabled")
+    return normalized
 
 def load_api_key_from_env(env_file: str) -> str:
     """Load OPENAI_API_KEY from a .env file in the project root."""
@@ -1199,11 +1182,15 @@ def process_script_job(
         update_job_status(job_id, state="error", last_message=str(e))
 
 # Background downloader with progress tracking
-def run_download_and_track(cmd, uid):
+def run_download_and_track(cmd, uid, yt_metadata=None):
     """Execute a shell command and stream output to a progress log."""
 
     PROGRESS_LOGS_DIR.mkdir(parents=True, exist_ok=True)
     log_path = PROGRESS_LOGS_DIR / f"progress_{uid}.log"
+    yt_title_prefix = "[watchup-title]"
+    yt_filepath_prefix = "[watchup-filepath]"
+    download_records: list[tuple[str, Path]] = []
+    current_title = str((yt_metadata or {}).get("title") or "")
     with open(log_path, "w") as f:
         try:
             process = subprocess.Popen(
@@ -1217,6 +1204,34 @@ def run_download_and_track(cmd, uid):
         for line in process.stdout:
             f.write(line)
             f.flush()
+            stripped = line.strip()
+            if stripped.startswith(yt_title_prefix):
+                current_title = stripped.removeprefix(yt_title_prefix).strip()
+            elif stripped.startswith(yt_filepath_prefix):
+                media_raw = stripped.removeprefix(yt_filepath_prefix).strip()
+                if media_raw:
+                    download_records.append((current_title, Path(media_raw).expanduser()))
+
+        process.wait()
+
+    if process.returncode == 0 and yt_metadata and download_records:
+        timestamp = str(yt_metadata.get("timestamp") or datetime.now().isoformat())
+        url = str(yt_metadata.get("url") or "")
+        for title, media_path in download_records:
+            try:
+                media_abs_path = media_path.resolve()
+            except Exception:
+                media_abs_path = media_path
+            if not media_abs_path.exists():
+                logger.warning("[YT] skipped sidecar write missing media file=%s", media_abs_path)
+                continue
+            write_watchup_sidecar(
+                media_path=media_abs_path,
+                url=url,
+                title=title or str(yt_metadata.get("title") or media_abs_path.stem),
+                uid=str(yt_metadata.get("uid") or uid),
+                timestamp=timestamp,
+            )
 
 @yt_bp.route('/yt', methods=['GET', 'POST'])
 def index():
@@ -1239,6 +1254,8 @@ def index():
             '--extractor-args', 'youtube:player_client=android',
             '-f', quality,
             '-S', 'proto:https,res,ext:mp4:m4a',
+            '--print', '[watchup-title]%(title)s',
+            '--print', 'after_move:[watchup-filepath]%(filepath)s',
             '-o', output_template,
             url
         ]
@@ -1261,7 +1278,13 @@ def index():
 
         try:
             # Run download in background thread and track progress
-            Thread(target=run_download_and_track, args=(cmd, uid), daemon=True).start()
+            yt_metadata = {
+                "url": url,
+                "title": "",
+                "uid": uid,
+                "timestamp": datetime.now().isoformat(),
+            }
+            Thread(target=run_download_and_track, args=(cmd, uid, yt_metadata), daemon=True).start()
             log_download(url, folder_path)
             flash(f"Download started for: {url} [ID: {uid}]", 'success')
 
@@ -1334,19 +1357,7 @@ def clipper_analyze():
         flash("No matching video file found. Please select a video manually.", "danger")
         return redirect(url_for('yt.clipper'))
 
-    source_metadata = find_source_for_video_filename(video_path.name)
-    if source_metadata["source_match_method"] == "none":
-        logger.info(
-            '[CLIPPER] source lookup video="%s" match_method=none',
-            video_path.name,
-        )
-    else:
-        logger.info(
-            '[CLIPPER] source lookup video="%s" match_method=%s url="%s"',
-            video_path.name,
-            source_metadata["source_match_method"],
-            source_metadata["source_url"],
-        )
+    source_metadata = load_source_metadata_from_sidecar(video_path)
 
     job_id = uuid.uuid4().hex[:12]
     blocks = build_blocks(cues, target_seconds=45, max_chars=1400)
@@ -1476,7 +1487,8 @@ def clipper_analyze():
         "source_url": source_metadata["source_url"],
         "source_title": source_metadata["source_title"],
         "source_timestamp": source_metadata["source_timestamp"],
-        "source_match_method": source_metadata["source_match_method"],
+        "source_uid": source_metadata["source_uid"],
+        "source_metadata_method": source_metadata["source_metadata_method"],
         "clips": [],
     }
     write_clipper_job(job_id, manifest)

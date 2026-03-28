@@ -37,7 +37,8 @@
       {% else %}
         Unknown
       {% endif %}<br>
-      Source match: {{ manifest.source_match_method or 'none' }}<br>
+      Source UID: {{ manifest.source_uid or 'Unknown' }}<br>
+      Source metadata: {{ manifest.source_metadata_method or 'none' }}<br>
       {% if transcript_pdf_exists %}
         <a href="{{ url_for('yt.clipper_download_transcript', job_id=manifest.job_id) }}">Download transcript PDF</a>
       {% else %}
