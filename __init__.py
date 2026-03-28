@@ -222,6 +222,100 @@ def log_magnet_download(link, folder_path):
     except Exception as e:
         print("❌ Failed to log magnet download:", e)
 
+
+def load_download_history() -> list[dict]:
+    try:
+        if history_path.exists():
+            history = json.loads(history_path.read_text())
+            if isinstance(history, list):
+                return history
+            logger.warning("[CLIPPER] download history is not a list: %s", history_path)
+    except Exception as exc:
+        logger.warning("[CLIPPER] failed to load download history path=%s error=%s", history_path, exc)
+    return []
+
+
+def normalize_history_title(value: str) -> str:
+    normalized = Path((value or "").strip()).stem
+    normalized = normalized.lower()
+    normalized = re.sub(r"[—–]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip()
+
+
+def parse_history_timestamp(value: object) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        return datetime.min
+    try:
+        return datetime.fromisoformat(value.strip())
+    except ValueError:
+        return datetime.min
+
+
+def find_source_for_video_filename(video_filename: str) -> dict:
+    video_stem = Path(video_filename or "").stem
+    history = load_download_history()
+    if not video_stem or not history:
+        return {
+            "source_url": None,
+            "source_title": None,
+            "source_timestamp": None,
+            "source_match_method": "none",
+        }
+
+    normalized_video_stem = normalize_history_title(video_stem)
+    exact_matches: list[dict] = []
+    normalized_matches: list[dict] = []
+    contains_matches: list[dict] = []
+
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        history_title = str(entry.get("title") or "").strip()
+        if not history_title:
+            continue
+        normalized_history_title = normalize_history_title(history_title)
+        if history_title == video_stem:
+            exact_matches.append(entry)
+            continue
+        if normalized_video_stem and normalized_video_stem == normalized_history_title:
+            normalized_matches.append(entry)
+            continue
+        if normalized_video_stem and normalized_history_title:
+            if normalized_video_stem in normalized_history_title or normalized_history_title in normalized_video_stem:
+                contains_matches.append(entry)
+
+    match_method = "none"
+    candidates: list[dict] = []
+    if exact_matches:
+        match_method = "exact"
+        candidates = exact_matches
+    elif normalized_matches:
+        match_method = "normalized"
+        candidates = normalized_matches
+    elif contains_matches:
+        match_method = "contains"
+        candidates = contains_matches
+
+    if not candidates:
+        return {
+            "source_url": None,
+            "source_title": None,
+            "source_timestamp": None,
+            "source_match_method": "none",
+        }
+
+    best = max(candidates, key=lambda item: parse_history_timestamp(item.get("timestamp")))
+    source_url = best.get("url")
+    source_title = best.get("title")
+    source_timestamp = best.get("timestamp")
+    return {
+        "source_url": source_url if isinstance(source_url, str) and source_url.strip() else None,
+        "source_title": source_title if isinstance(source_title, str) and source_title.strip() else None,
+        "source_timestamp": source_timestamp if isinstance(source_timestamp, str) and source_timestamp.strip() else None,
+        "source_match_method": match_method,
+    }
+
 def load_api_key_from_env(env_file: str) -> str:
     """Load OPENAI_API_KEY from a .env file in the project root."""
     env_path = Path(env_file)
@@ -1240,6 +1334,20 @@ def clipper_analyze():
         flash("No matching video file found. Please select a video manually.", "danger")
         return redirect(url_for('yt.clipper'))
 
+    source_metadata = find_source_for_video_filename(video_path.name)
+    if source_metadata["source_match_method"] == "none":
+        logger.info(
+            '[CLIPPER] source lookup video="%s" match_method=none',
+            video_path.name,
+        )
+    else:
+        logger.info(
+            '[CLIPPER] source lookup video="%s" match_method=%s url="%s"',
+            video_path.name,
+            source_metadata["source_match_method"],
+            source_metadata["source_url"],
+        )
+
     job_id = uuid.uuid4().hex[:12]
     blocks = build_blocks(cues, target_seconds=45, max_chars=1400)
     if not blocks:
@@ -1365,6 +1473,10 @@ def clipper_analyze():
         "summary_path": str(summary_path),
         "summary_pdf_path": str(summary_pdf_path) if summary_pdf_path.exists() else "",
         "summary_model": summary_model,
+        "source_url": source_metadata["source_url"],
+        "source_title": source_metadata["source_title"],
+        "source_timestamp": source_metadata["source_timestamp"],
+        "source_match_method": source_metadata["source_match_method"],
         "clips": [],
     }
     write_clipper_job(job_id, manifest)
@@ -1958,10 +2070,7 @@ def clipper_download(filename):
 @yt_bp.route('/yt/history')
 def history():
     try:
-        if history_path.exists():
-            history = json.loads(history_path.read_text())
-        else:
-            history = []
+        history = load_download_history()
     except Exception as e:
         print("❌ Failed to load history:", e)
         history = []
